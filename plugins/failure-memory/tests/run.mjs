@@ -763,6 +763,37 @@ check("an entry with no dates at all renders without a dangling comma", () => {
   assert(ctx.includes("(failed 2x)"), `malformed count clause: ${ctx}`);
 });
 
+check("an entry with no error text renders without a dangling separator", () => {
+  // Reachable in the field: excerptFor() returns "" whenever the captured
+  // payload had no usable error string, so this is the shape a real ledger row
+  // takes -- not a synthetic edge case. A trailing " -- " reads as truncated
+  // error text, which is the opposite of what an empty excerpt means.
+  for (const excerpt of ["", "   ", undefined]) {
+    const label = JSON.stringify(excerpt);
+    const ctx = renderContext([
+      { tool: "Bash", signature: "npm test", count: 2, last_seen: iso(1), error_excerpt: excerpt },
+    ]);
+    const line = ctx.split("\n")[1];
+    assert(line !== undefined, `no line rendered for excerpt ${label}`);
+    assert(!/--\s*$/.test(line), `dangling separator for excerpt ${label}: ${JSON.stringify(line)}`);
+    assert(
+      !line.includes("undefined") && !line.includes("null"),
+      `placeholder leaked into the line for excerpt ${label}: ${JSON.stringify(line)}`,
+    );
+    assert(
+      line.endsWith(")"),
+      `line should end at the count clause for excerpt ${label}: ${JSON.stringify(line)}`,
+    );
+  }
+});
+
+check("an entry with error text still renders the separator and the text", () => {
+  const ctx = renderContext([
+    { tool: "Bash", signature: "npm test", count: 2, last_seen: iso(1), error_excerpt: "exit 1" },
+  ]);
+  assert(ctx.includes(") -- exit 1"), `separator lost: ${ctx}`);
+});
+
 check("the injected header is an observation, not an instruction", () => {
   const ctx = renderContext([
     { tool: "Bash", signature: "npm test", count: 2, last_seen: iso(1), error_excerpt: "boom" },

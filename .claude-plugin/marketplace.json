@@ -9,7 +9,7 @@
     {
       "name": "failure-memory",
       "source": "./plugins/failure-memory",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "description": "Remembers tool calls that keep failing in a project and reminds you at the start of the next session. Local only, no network.",
       "author": {
         "name": "carloluisito",
