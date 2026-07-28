@@ -1033,6 +1033,20 @@ check("README documents the caveats a user needs", () => {
   }
 });
 
+// The Bash-only asymmetry is the single thing about this plugin a user is most
+// likely to be surprised by: they fix an Edit failure and it keeps being
+// replayed. Asserted here so the section cannot quietly be dropped -- and
+// resolve.mjs names it by heading in its own header comment.
+check("README documents that only Bash entries self-clear", () => {
+  const readme = readFileSync(join(PLUGIN, "README.md"), "utf8");
+  assert(
+    readme.includes("## What self-clears and what does not"),
+    "README missing the self-clearing section",
+  );
+  assert(readme.includes("Only \`Bash\` entries self-clear"), "README does not state the Bash-only limit");
+  assert(/Three hooks/.test(readme), "README still describes two hooks");
+});
+
 check("hooks.json registers all three events with no absolute paths", () => {
   const raw = readFileSync(join(PLUGIN, "hooks", "hooks.json"), "utf8");
   const hooks = JSON.parse(raw).hooks;

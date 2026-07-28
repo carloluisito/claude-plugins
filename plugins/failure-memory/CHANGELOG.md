@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-29
+
+### Added
+
+- **A fixed problem stops being replayed.** A `PostToolUse` hook on `Bash` undoes
+  one observation of a signature when that command succeeds, and drops the entry
+  once its count reaches zero. Before this, counts only ever went up, so a
+  problem you had already fixed kept being reported at session start for the full
+  30-day window — the reminder outlived its usefulness and trained you to ignore
+  the whole injection.
+- README section *What self-clears and what does not*, documenting the
+  `Bash`-only limit and the flaky-command tradeoff.
+
+### Notes
+
+- **Only `Bash` entries self-clear**, and this is a limit rather than a first cut.
+  Every non-`Bash` signature folds the class of the error into its key, and a
+  success carries no error to classify, so a stored `Edit`/`Write`/`Task`/MCP key
+  cannot be reconstructed from the successful call. Those entries still age out
+  after 30 days.
+- **A flaky command decays.** One-for-one decrementing means something that fails
+  half the time can drift below the replay threshold while still being broken.
+  The alternative — demanding several clean runs before clearing — leaves stale
+  reminders alive for days after a real fix, which is the worse failure.
+- **No schema change, and no history is lost.** The signature rules are
+  untouched, so `schema` stays at 2 and existing ledgers are read as-is.
+- A success against a signature that is not in the ledger leaves the file
+  byte-identical, and a success with no ledger at all creates neither the file
+  nor its directory.
+- `last_seen` is not refreshed by a decrement. It records when the failure last
+  happened; a success is not a failure.
+
 ## [0.2.0] - 2026-07-28
 
 ### Changed
