@@ -1,6 +1,6 @@
 {
   "name": "failure-memory",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Remembers tool calls that keep failing in a project and reminds you at the start of the next session. Local only, no network.",
   "author": { "name": "carloluisito", "url": "https://github.com/carloluisito" },
   "homepage": "https://github.com/carloluisito/claude-plugins/tree/main/plugins/failure-memory",
