@@ -26,6 +26,10 @@ Two things to point out if they are true:
 - A `*` marks the entries that are actually replayed into new sessions. An
   unmarked entry is recorded but silent — it is not the cause of a note the user
   is seeing.
+- If the listing reports a problem instead of entries, relay the reason it gave
+  rather than diagnosing one. In particular a ledger from another schema is
+  well-formed — it is not corrupt and it cannot be parsed wrongly; it is simply
+  keyed by rules this build no longer uses.
 - A `data dir:` note about the fallback path means the listing is probably not
   reading the file the hooks are writing. Say so rather than reporting an empty
   ledger as fact. The plugin README section "The data directory did not expand"
@@ -68,9 +72,12 @@ and says so.
 
 Two limits to be honest about:
 
-- Forgetting clears the record; it does not add an exception. If the same call
-  fails twice again, the entry comes back with a fresh count. There is no
-  ignore list.
+- Forgetting clears the record; it does not add an exception. The **next** time
+  that call fails the entry is back with a count of one, and two observations
+  put it back in session context. There is no ignore list. Keep those two
+  numbers apart when you relay this: "if it fails twice again it comes back" is
+  wrong, and it is the natural thing to say, because one failure is enough to
+  re-create the entry and two are what make it *replay*.
 - Only `Bash` entries clear themselves. When a recorded Bash command later
   succeeds, the plugin decrements it automatically. Entries for `Edit`,
   `Write`, `Task` or MCP tools never self-clear, because the hook that watches

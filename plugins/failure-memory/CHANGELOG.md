@@ -24,9 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
-- **Forgetting clears the record; it does not add an exception.** Fail the same
-  call twice again and the entry returns with a fresh count. There is no ignore
-  list, and adding one is a separate decision.
+- **Forgetting clears the record; it does not add an exception.** The next
+  failure of that call re-creates the entry with a count of one, and a second
+  failure is what puts it back in session context. There is no ignore list, and
+  adding one is a separate decision.
+- **A `forget` that matches some ids and not others says so.** An earlier draft
+  reported only what it removed, so `forget <good> <typo>` printed
+  `Forgot 1 entry:` and never mentioned the typo — the zero-match case reported
+  clearly, the partial-match case did not. Found by running the mixed case; both
+  the reporting and the property that no message conflates the two thresholds
+  are now pinned by tests.
+- **The corrupt- and malformed-ledger messages no longer tell you to delete the
+  file.** Both said "Delete the file to start over", describing manual work that
+  is almost never needed: the hooks' own reader quarantines an unreadable ledger
+  to `<name>.json.corrupt` and starts fresh on the next session start or failed
+  tool call. The messages now say that instead.
 - The entries worth forgetting by hand are the non-`Bash` ones — those are the
   only ones that never self-clear, because the `PostToolUse` hook that
   decrements on success matches `Bash` only. A stale `Edit` or MCP entry

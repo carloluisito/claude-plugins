@@ -127,10 +127,10 @@ in the same directory, never from an older transcript.
 
 Two limits worth knowing before you use it:
 
-- **Forgetting clears the record; it does not add an exception.** Fail the same
-  call twice again and the entry comes back with a fresh count. There is no
-  ignore list, and there is no way to tell this plugin to stop watching
-  something.
+- **Forgetting clears the record; it does not add an exception.** The *next*
+  time that call fails the entry is back with a count of one, and a second
+  failure puts it back in your session context. There is no ignore list, and
+  there is no way to tell this plugin to stop watching something.
 - The entries actually worth forgetting by hand are the non-`Bash` ones, because
   those are the only ones that never clear themselves — see [What self-clears and
   what does not](#what-self-clears-and-what-does-not). A `Bash` entry usually

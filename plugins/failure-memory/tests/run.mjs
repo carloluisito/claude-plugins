@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   MAX_ENTRIES,
+  MIN_COUNT,
   RENDER_BUDGET,
   SCHEMA,
   decrementEntry,
@@ -1319,11 +1320,10 @@ check("the empty listing does not confuse creation with the replay threshold", (
   // tell the user two are needed for it to exist.
   assert(existsSync(ledgerPathFor(d, p.cwd)), "one failure creates the ledger");
   assert(!/No ledger yet/.test(after.stdout), `and the listing sees it: ${after.stdout}`);
-  assert(
-    !/fails? twice/.test(before.stdout),
-    `so the empty message must not require two failures: ${before.stdout}`,
-  );
-  // It should still be honest about what two failures do buy you.
+  // It should still be honest about what two failures do buy you. The wording of
+  // that claim is checked for every message, not just this one, by "no CLI
+  // message attaches the replay threshold to anything but replay" below -- this
+  // one asserting a single string is what let the same defect come back twice.
   assert(/replay/.test(before.stdout), `it explains the real threshold: ${before.stdout}`);
 });
 
@@ -1461,6 +1461,126 @@ check("forget with no id at all changes nothing", () => {
   assertEqual(r.status, 0, "exit code");
   assert(/needs at least one entry id/.test(r.stdout), `asks for one: ${r.stdout}`);
   assertEqual(readFileSync(path, "utf8"), before, "file untouched");
+});
+
+// A forget that hits some ids and misses others used to report only the hits:
+// "Forgot 1 entry:" then "0 entries left.", with the typo'd id never mentioned.
+// The zero-match case reported clearly and the partial-match case did not, so
+// the failure mode was invisible exactly when it was easiest to make.
+check("forget names the ids it did not find, even when others matched", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = ledgerFixture();
+  const path = seedLedger(d, entries, p.cwd);
+
+  const real = idFor(entries[1]);
+  const r = ledgerCli(["forget", real, "00000000"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(r.stdout.includes("Forgot 1 entry"), `reports the hit: ${r.stdout}`);
+  assert(r.stdout.includes("00000000"), `names the miss: ${r.stdout}`);
+
+  // The hit still has to land, or "report the miss" would be satisfied by
+  // refusing the whole call.
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  assertEqual(
+    JSON.stringify(after.entries),
+    JSON.stringify([entries[0], entries[2]]),
+    "the matched entry is gone and the rest survive",
+  );
+});
+
+// The claim that two failures are what create a record has now been wrong in
+// three different places, because each fix pinned one string. What recurs is
+// the class, so pin the property instead: MIN_COUNT is the replay threshold and
+// nothing else, so any sentence that cites it must be talking about replay.
+check("no CLI message attaches the replay threshold to anything but replay", () => {
+  const p = fixtureProject();
+  const plant = (contents) => {
+    const d = freshDataDir();
+    const f = ledgerPathFor(d, p.cwd);
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, contents, "utf8");
+    return d;
+  };
+  const states = {
+    missing: () => freshDataDir(),
+    empty: () => {
+      const d = freshDataDir();
+      seedLedger(d, [], p.cwd);
+      return d;
+    },
+    ok: () => {
+      const d = freshDataDir();
+      seedLedger(d, ledgerFixture(), p.cwd);
+      return d;
+    },
+    unparsable: () => plant("{ not json at all"),
+    malformed: () => plant(JSON.stringify({ nope: true })),
+    foreign: () => plant(JSON.stringify({ cwd: p.cwd, schema: SCHEMA + 97, entries: [] }, null, 2)),
+  };
+  const invocations = [
+    ["list"],
+    ["forget"],
+    ["forget", "00000000"],
+    ["forget", idFor(ledgerFixture()[1])],
+    ["forget", idFor(ledgerFixture()[1]), "00000000"],
+    ["explode"],
+  ];
+
+  // Built from MIN_COUNT so the test cannot outlive a change to the constant.
+  const threshold = new RegExp(
+    String.raw`\btwice\b|\b${MIN_COUNT}\+?\s*(?:times|observations|failures)\b`,
+    "i",
+  );
+  let cited = 0;
+  for (const [label, make] of Object.entries(states)) {
+    for (const args of invocations) {
+      const d = make();
+      const r = ledgerCli(args, { dataDir: d, cwd: p.dir });
+      assertEqual(r.status, 0, `${label} + ${args.join(" ")} exits 0`);
+      // Per sentence, not per line: the forget advice puts "2 observations" and
+      // "session context" on two different pushed lines.
+      for (const sentence of r.stdout.replace(/\s+/g, " ").split(/(?<=\.)\s+/)) {
+        if (!threshold.test(sentence)) continue;
+        cited += 1;
+        assert(
+          /replay|session/i.test(sentence),
+          `${label} + ${args.join(" ")}: "${sentence.trim()}" cites the threshold without saying it is about replay`,
+        );
+      }
+    }
+  }
+  // Deleting every mention would satisfy the loop above and prove nothing.
+  assert(cited > 0, "the threshold is stated somewhere");
+  const missing = ledgerCli(["list"], { dataDir: freshDataDir(), cwd: p.dir }).stdout;
+  assert(/first failure/i.test(missing), `and creation is stated correctly: ${missing}`);
+});
+
+// Both messages told the user to "Delete the file to start over", which is
+// manual work the plugin already does: readLedger() renames an unreadable
+// ledger to <name>.json.corrupt on the next hook run. Prescribing a
+// destructive step when nothing needs doing is worse than saying nothing.
+check("a broken ledger is explained by the recovery, not by a delete instruction", () => {
+  const p = fixtureProject();
+  const shapes = [
+    ["unparsable", "{ not json at all"],
+    ["malformed", JSON.stringify({ nope: true })],
+  ];
+  for (const [label, contents] of shapes) {
+    const d = freshDataDir();
+    const path = ledgerPathFor(d, p.cwd);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, contents, "utf8");
+
+    const r = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+    assertEqual(r.status, 0, `exit code for ${label}`);
+    assert(r.stdout.includes(".corrupt"), `${label} names where it goes: ${r.stdout}`);
+    assert(
+      !/delete the file/i.test(r.stdout),
+      `${label} must not prescribe a manual delete: ${r.stdout}`,
+    );
+    assertEqual(readFileSync(path, "utf8"), contents, `${label} left the file alone`);
+  }
 });
 
 // readLedger() quarantines a corrupt file by renaming it. That is right for a
