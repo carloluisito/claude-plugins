@@ -15,10 +15,16 @@ import { spawnSync } from "node:child_process";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGINS_DIR = join(ROOT, "plugins");
-const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
+const WIN = process.platform === "win32";
+const NPM = WIN ? "npm.cmd" : "npm";
 
-function run(cmd, args, cwd) {
-  const r = spawnSync(cmd, args, { cwd, stdio: "inherit", shell: process.platform === "win32" });
+// `shell` is opt-in per call, and deliberately NOT set for `process.execPath`.
+// On Windows that path is normally "C:\Program Files\nodejs\node.exe"; routing it
+// through cmd.exe splits it on the space and the run dies with
+// "'C:\Program' is not recognized...". Only npm needs a shell, because Node
+// refuses to spawn a .cmd file directly.
+function run(cmd, args, cwd, { shell = false } = {}) {
+  const r = spawnSync(cmd, args, { cwd, stdio: "inherit", shell });
   if (r.error) {
     console.error(`  could not execute ${cmd}: ${r.error.message}`);
     return 1;
@@ -64,12 +70,12 @@ for (const name of dirs) {
   if (hasNpmTest) {
     // Prefer a reproducible install; fall back when there is no lockfile.
     const installArgs = existsSync(join(dir, "package-lock.json")) ? ["ci"] : ["install"];
-    if (run(NPM, installArgs, dir) !== 0) {
+    if (run(NPM, installArgs, dir, { shell: WIN }) !== 0) {
       console.error(`  npm ${installArgs[0]} failed`);
       failed.push(name);
       continue;
     }
-    if (run(NPM, ["test", "--silent"], dir) !== 0) failed.push(name);
+    if (run(NPM, ["test", "--silent"], dir, { shell: WIN }) !== 0) failed.push(name);
     continue;
   }
 
