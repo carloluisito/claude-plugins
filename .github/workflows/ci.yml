@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  manifests:
+    name: manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Authoritative gate: zero dependencies, deterministic, cannot be broken
+      # by anything outside this repository.
+      - name: Validate repository structure
+        run: node scripts/validate-repo.mjs
+
+      # Advisory: the official validator is the real install-time authority, but
+      # it depends on an external npm package that may not run cleanly in CI, so
+      # it must never be the thing that blocks a merge. Once it has proven
+      # reliable here it can be promoted to a blocking step.
+      - name: Validate with official Claude Code validator (advisory)
+        continue-on-error: true
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          # An empty marketplace trips a warning, so --strict only applies once
+          # at least one plugin is listed.
+          if node -e 'const m=require("./.claude-plugin/marketplace.json");process.exit(Array.isArray(m.plugins)&&m.plugins.length>0?0:1)'; then
+            claude plugin validate . --strict
+          else
+            echo "Marketplace has no plugins yet — running without --strict."
+            claude plugin validate .
+          fi
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run plugin test suites
+        run: node scripts/run-plugin-tests.mjs

@@ -1,0 +1,9 @@
+{
+  "name": "carloluisito-plugins",
+  "owner": {
+    "name": "carloluisito",
+    "url": "https://github.com/carloluisito"
+  },
+  "description": "Open-source plugins for Claude Code.",
+  "plugins": []
+}
