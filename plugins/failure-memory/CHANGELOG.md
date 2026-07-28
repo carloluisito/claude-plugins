@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because acquiring the lock creates the ledger directory.
 - The skill carries `disable-model-invocation: true`: Claude will not read your
   ledger unprompted.
+- The empty listing states that the **first** failure creates the ledger, and
+  that two failures are what make an entry *replay*. An earlier draft said the
+  file arrived once a call "fails twice here", conflating the two thresholds;
+  caught by running the skill in a project with no ledger, where the wrong
+  sentence was read back to the user as fact. The wording is now pinned by a test.
 - Its `allowed-tools` rule uses `${CLAUDE_SKILL_DIR}`, which Claude Code only
   expands there from **v2.1.129**. On older versions the rule does not match and
   the first run asks permission to execute the script; approving it is the whole

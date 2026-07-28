@@ -1300,6 +1300,33 @@ check("list reports a project that has no ledger yet", () => {
   assert(r.stdout.includes(ledgerPathFor(d, p.cwd)), "names where it would live");
 });
 
+// The empty listing is the first thing most users see, and whatever it says
+// about when a ledger appears is what they will believe. It said the file
+// arrives once a call "fails twice here", which is the replay threshold, not
+// the creation threshold -- capture writes the file on the first failure. The
+// wrong claim reached the user through the skill, which reads this text aloud.
+check("the empty listing does not confuse creation with the replay threshold", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const before = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+
+  // bashFailure defaults to PROJECT; the failure has to be recorded against the
+  // fixture project the CLI runs in, or the listing below reads a different file.
+  capture(d, bashFailure("npm test", undefined, { cwd: p.cwd }));
+  const after = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+
+  // One failure is enough to create the file, so the empty message must not
+  // tell the user two are needed for it to exist.
+  assert(existsSync(ledgerPathFor(d, p.cwd)), "one failure creates the ledger");
+  assert(!/No ledger yet/.test(after.stdout), `and the listing sees it: ${after.stdout}`);
+  assert(
+    !/fails? twice/.test(before.stdout),
+    `so the empty message must not require two failures: ${before.stdout}`,
+  );
+  // It should still be honest about what two failures do buy you.
+  assert(/replay/.test(before.stdout), `it explains the real threshold: ${before.stdout}`);
+});
+
 // The starred rows are the plugin's claim about what SessionStart will replay.
 // If that claim drifts from selectForReplay() the listing misinforms, which is
 // worse than not having a listing at all.
