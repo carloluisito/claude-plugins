@@ -5,10 +5,17 @@ All notable changes to this plugin are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.1] - 2026-07-29
 
 ### Fixed
 
+- **An entry with no error text no longer renders a dangling `--`.** The replayed
+  line always ended with ` -- ` followed by the excerpt, but `excerptFor()`
+  returns `""` whenever the captured failure carried no usable error string, so
+  those entries rendered as `... (failed 2x, last 2026-07-27) -- ` with nothing
+  after the separator. That reads as truncated error text, which is the opposite
+  of what an empty excerpt means. The separator is now conditional, exactly as
+  the date clause already was.
 - **The test suite no longer leaves temp directories behind.** A run created
   44 temp directories and removed only 31, so every invocation — including a
   fully passing one — leaked 13 into the OS temp dir, and nothing ever reclaimed
@@ -27,9 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
-- Documentation and tests only; no behaviour change, so the version is
-  unchanged. A test pins both documented paths, and asserts the fallback
-  against what `resolveDataDir()` actually returns so the two cannot drift.
+- The render fix changes the injected text for entries with no error excerpt;
+  everything else in this release is documentation and tests. A test pins both
+  documented paths, and asserts the fallback against what `resolveDataDir()`
+  actually returns so the two cannot drift.
 
 ## [0.3.0] - 2026-07-29
 

@@ -579,7 +579,13 @@ export function renderContext(selected) {
     const last = shortDate(e.last_seen);
     const dates = [first && `first ${first}`, last && `last ${last}`].filter(Boolean);
     const when = dates.length > 0 ? `, ${dates.join(", ")}` : "";
-    const line = `- ${e.tool}: ${e.signature} (failed ${e.count}x${when}) -- ${e.error_excerpt}`;
+    // The separator is conditional for the same reason the dates are: an entry
+    // whose failure carried no error text would otherwise render a trailing
+    // " -- " with nothing after it, which reads as truncation rather than as
+    // absence.
+    const excerpt = String(e.error_excerpt ?? "").trim();
+    const why = excerpt ? ` -- ${excerpt}` : "";
+    const line = `- ${e.tool}: ${e.signature} (failed ${e.count}x${when})${why}`;
     const clipped = line.length > 240 ? `${line.slice(0, 237)}...` : line;
     if (used + clipped.length + 1 > RENDER_BUDGET) break;
     lines.push(clipped);
