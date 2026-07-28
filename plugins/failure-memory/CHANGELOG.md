@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The test suite no longer leaves temp directories behind.** A run created
+  44 temp directories and removed only 31, so every invocation — including a
+  fully passing one — leaked 13 into the OS temp dir, and nothing ever reclaimed
+  them. Cleanup now happens once at end of run for every directory the suite
+  creates, so it can no longer be skipped by a failing test (`check()` swallows
+  the assertion, which skipped that test's trailing `rmSync`) or forgotten by a
+  newly added one. A check asserts the suite leaves nothing behind.
 - **The README now says where the ledger actually is.** *What is stored, and
   where* gave an unresolved `<plugin data dir>` placeholder, so the one
   verification step the README told you to take — open the JSON file — was the
