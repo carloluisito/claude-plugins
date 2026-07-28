@@ -101,13 +101,44 @@ entry inside the 30-day window indefinitely.
 
 ## What is stored, and where
 
-One JSON file per project directory, under the plugin's data directory:
+One JSON file per project directory, under the plugin's data directory. For a
+normal install from this marketplace:
 
 ```
-<plugin data dir>/ledger/<16 hex chars>.json
+~/.claude/plugins/data/failure-memory-carloluisito-plugins/ledger/<16 hex chars>.json
 ```
 
-The filename is a truncated SHA-256 of the project path. Each file looks like:
+On Windows `~/.claude` is `%USERPROFILE%\.claude`. That directory name is the
+plugin identifier `failure-memory@carloluisito-plugins` with every character
+outside `a-zA-Z0-9_-` replaced by `-`; the derivation is Claude Code's, not this
+plugin's.
+
+Two things move that path, and both are worth knowing before you go hunting.
+
+**A non-default config directory.** `~/.claude` is the default root, not a fixed
+one. Setting [`CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/env-vars)
+relocates the whole tree — settings, history, `plugins/data/` and your ledger
+with it. If you run Claude Code under that variable, look there instead.
+
+**The placeholder not expanding.** Each hook is handed `${CLAUDE_PLUGIN_DATA}`
+by Claude Code. If that ever arrives empty or literally unexpanded, the plugin
+falls back to:
+
+```
+~/.claude/plugins/data/failure-memory/ledger/
+```
+
+Note the missing `-carloluisito-plugins`. The two are siblings with nearly the
+same name, so check both before concluding nothing was captured. Capture works
+either way — but the fallback is not the intended path, and a ledger showing up
+there means the placeholder did not expand in your environment, which is worth
+[reporting](https://github.com/carloluisito/claude-plugins/issues).
+
+Don't try to compute the filename. It is a truncated SHA-256 of the project
+path, so list `ledger/` and open one — every file records the directory it
+belongs to as its first field.
+
+Each file looks like:
 
 ```json
 {
@@ -170,7 +201,7 @@ from one.
 
 All three hooks exit `0` unconditionally. Malformed input, an unreadable data
 directory, a corrupt ledger, a missing `node` — all of it degrades to doing
-nothing. Neither hook can block a tool call or a session.
+nothing. No hook can block a tool call or a session.
 
 Interrupted tool calls (`is_interrupt: true`) are not recorded. Pressing escape
 is not a failure.
@@ -193,8 +224,9 @@ Successes are **not** recorded — a `Bash` success only ever subtracts from an
 entry that already exists, and one that matches nothing is a no-op. Nothing
 counts how often a command works.
 
-There is no slash command for inspecting or editing the ledger; read the JSON
-file if you want to see it, and delete it if you want to start over.
+There is no slash command for inspecting or editing the ledger. Read the JSON
+file if you want to see it — [What is stored, and where](#what-is-stored-and-where)
+gives the full path — and delete it if you want to start over.
 
 Non-`Bash` failures cannot be cleared by fixing them, only by waiting them out.
 That is a limit of the signature, not an oversight — see [What self-clears and

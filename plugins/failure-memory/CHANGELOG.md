@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The README now says where the ledger actually is.** *What is stored, and
+  where* gave an unresolved `<plugin data dir>` placeholder, so the one
+  verification step the README told you to take — open the JSON file — was the
+  one step it did not let you take. It now gives the installed path, the
+  fallback path used when `${CLAUDE_PLUGIN_DATA}` does not expand, and notes
+  that `CLAUDE_CONFIG_DIR` relocates both.
+- Stale wording in *Failure behaviour*: "Neither hook" dated from the two-hook
+  build and was left behind by 0.3.0, which added a third.
+
+### Notes
+
+- Documentation and tests only; no behaviour change, so the version is
+  unchanged. A test pins both documented paths, and asserts the fallback
+  against what `resolveDataDir()` actually returns so the two cannot drift.
+
 ## [0.3.0] - 2026-07-29
 
 ### Added
