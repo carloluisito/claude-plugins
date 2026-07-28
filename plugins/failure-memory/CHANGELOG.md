@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-28
+
+### Fixed
+
+- The plugin could not be loaded at all. `plugin.json` declared
+  `"hooks": "./hooks/hooks.json"`, but that file is already loaded by
+  convention, so Claude Code rejected the plugin with "Duplicate hooks file
+  detected" and neither hook ever registered. Removing the redundant manifest
+  key fixes loading — `manifest.hooks` is only for *additional* hook files.
+  Anyone who installed 0.1.0 should update to pick this up.
+
 ## [0.1.0] - 2026-07-28
 
 ### Added
