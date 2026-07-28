@@ -2,7 +2,7 @@
 // Tests for failure-memory. Plain Node, zero dependencies.
 // Run from the plugin directory: node tests/run.mjs
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,6 +12,7 @@ import {
   MAX_ENTRIES,
   RENDER_BUDGET,
   SCHEMA,
+  decrementEntry,
   firstStage,
   ledgerPathFor,
   normalizeText,
@@ -28,6 +29,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = join(HERE, "..");
 const CAPTURE = join(PLUGIN, "scripts", "capture.mjs");
 const REPLAY = join(PLUGIN, "scripts", "replay.mjs");
+const RESOLVE = join(PLUGIN, "scripts", "resolve.mjs");
 
 let passed = 0;
 const failures = [];
@@ -35,6 +37,17 @@ const failures = [];
 function check(name, fn) {
   try {
     fn();
+    passed += 1;
+    console.log(`  ok  ${name}`);
+  } catch (err) {
+    failures.push({ name, err });
+    console.log(`FAIL  ${name}\n      ${err && err.message}`);
+  }
+}
+
+async function checkAsync(name, fn) {
+  try {
+    await fn();
     passed += 1;
     console.log(`  ok  ${name}`);
   } catch (err) {
@@ -77,6 +90,14 @@ function replay(dataDir, payload = { hook_event_name: "SessionStart", cwd: PROJE
   return r;
 }
 
+function resolveHook(dataDir, payload) {
+  const r = spawnSync(process.execPath, [RESOLVE, dataDir], {
+    input: typeof payload === "string" ? payload : JSON.stringify(payload),
+    encoding: "utf8",
+  });
+  return r;
+}
+
 function ledgerOf(dataDir, cwd = PROJECT) {
   const p = ledgerPathFor(dataDir, cwd);
   if (!existsSync(p)) return null;
@@ -95,6 +116,24 @@ function bashFailure(command, error = "Command exited with non-zero status code 
     tool_use_id: "toolu_test",
     error,
     is_interrupt: false,
+    duration_ms: 12,
+    ...extra,
+  };
+}
+
+// A PostToolUse payload. Note what is absent: there is no exit code and no
+// error field. PostToolUse fires only after a successful call, so the event
+// identity is itself the success signal.
+function bashSuccess(command, extra = {}) {
+  return {
+    session_id: "test-session",
+    transcript_path: "/tmp/t.jsonl",
+    cwd: PROJECT,
+    permission_mode: "default",
+    hook_event_name: "PostToolUse",
+    tool_name: "Bash",
+    tool_input: { command, description: "test" },
+    tool_use_id: "toolu_test",
     duration_ms: 12,
     ...extra,
   };
@@ -763,6 +802,209 @@ check("renderContext returns empty string for no entries", () => {
   assertEqual(renderContext([]), "", "empty");
 });
 
+// --- resolve / decrement on success (issue #4) ------------------------------
+
+console.log("resolve");
+
+check("two failures then two successes clears the entry", () => {
+  const d = freshDataDir();
+  capture(d, bashFailure("npm test"));
+  capture(d, bashFailure("npm test"));
+  assertEqual(ledgerOf(d).entries[0].count, 2, "seeded to 2");
+  resolveHook(d, bashSuccess("npm test"));
+  assertEqual(ledgerOf(d).entries[0].count, 1, "first success walks it back");
+  resolveHook(d, bashSuccess("npm test"));
+  assertEqual(ledgerOf(d).entries.length, 0, "second success removes it");
+});
+
+check("one failure then one success clears the entry", () => {
+  const d = freshDataDir();
+  capture(d, bashFailure("cargo build"));
+  assertEqual(ledgerOf(d).entries.length, 1, "seeded");
+  resolveHook(d, bashSuccess("cargo build"));
+  assertEqual(ledgerOf(d).entries.length, 0, "entry gone at zero, not left sitting at count 0");
+});
+
+check("two failures then one success leaves count 1 and stops replay", () => {
+  const d = freshDataDir();
+  capture(d, bashFailure("pytest -x"));
+  capture(d, bashFailure("pytest -x"));
+  resolveHook(d, bashSuccess("pytest -x"));
+  const entries = ledgerOf(d).entries;
+  assertEqual(entries.length, 1, "entry survives");
+  assertEqual(entries[0].count, 1, "count decremented to 1");
+  assertEqual(selectForReplay(entries, Date.now()).length, 0, "below MIN_COUNT, so not replayed");
+  const r = replay(d);
+  assertEqual(r.stdout.trim(), "", "replay injects nothing");
+});
+
+check("a success never lowers a count below zero", () => {
+  const d = freshDataDir();
+  capture(d, bashFailure("make"));
+  resolveHook(d, bashSuccess("make"));
+  resolveHook(d, bashSuccess("make"));
+  resolveHook(d, bashSuccess("make"));
+  assertEqual(ledgerOf(d).entries.length, 0, "still just gone");
+});
+
+check("a success with no matching signature leaves the file byte-identical", () => {
+  const d = freshDataDir();
+  capture(d, bashFailure("npm test"));
+  const p = ledgerPathFor(d, PROJECT);
+  const bytesBefore = readFileSync(p);
+  const r = resolveHook(d, bashSuccess("git status"));
+  assertEqual(r.status, 0, "exits 0");
+  assert(bytesBefore.equals(readFileSync(p)), "ledger bytes unchanged");
+});
+
+check("a success with no ledger file creates no file", () => {
+  const d = freshDataDir();
+  const r = resolveHook(d, bashSuccess("echo hi"));
+  assertEqual(r.status, 0, "exits 0");
+  assertEqual(ledgerOf(d), null, "no ledger");
+  // Not even the containing directory: a success must be completely inert.
+  assert(!existsSync(dirname(ledgerPathFor(d, PROJECT))), "no ledger directory created");
+});
+
+check("a decrement does not refresh last_seen", () => {
+  const d = freshDataDir();
+  const stamp = iso(8);
+  seedLedger(d, [
+    { tool: "Bash", signature: "npm test", count: 3, first_seen: iso(9), last_seen: stamp, error_excerpt: "x" },
+  ]);
+  resolveHook(d, bashSuccess("npm test"));
+  const e = ledgerOf(d).entries[0];
+  assertEqual(e.count, 2, "decremented");
+  assertEqual(e.last_seen, stamp, "last_seen byte-identical");
+  // Guards the reason it matters: a refreshed last_seen would hold a
+  // half-cleared entry inside the replay window forever.
+  assert(Date.now() - Date.parse(e.last_seen) > 7 * 86_400_000, "still ~8 days old, not now");
+});
+
+check("capture and decrement key on the identical string", () => {
+  // The one silent failure mode of this hook: if the two paths ever normalized
+  // differently, counts would simply never go down and nothing would look
+  // wrong. So assert against the shared exported function rather than a
+  // hardcoded expectation, which would drift with it.
+  for (const command of [
+    "npm test",
+    "  NPM   test  ",
+    "git commit -m 'a message with spaces'",
+    "curl -sSL https://example.com/x?token=abc123",
+    "docker run --rm -it -v /a:/b alpine sh -c 'exit 1'",
+    "node /tmp/nonce-9182734/script.mjs --port 5173",
+  ]) {
+    const captureKey = signatureFor("Bash", { command }, "Command exited with non-zero status code 1");
+    const resolveKey = signatureFor("Bash", { command }, undefined);
+    assertEqual(resolveKey, captureKey, `signature drift for: ${command}`);
+  }
+});
+
+check("a Bash key never depends on the error text, end to end", () => {
+  // Consequence of the above, verified through the real processes rather than
+  // the library: capture writes a key resolve can find with no error text at all.
+  const d = freshDataDir();
+  capture(d, bashFailure("pnpm -r build", "ELIFECYCLE  Command failed with exit code 2"));
+  capture(d, bashFailure("pnpm -r build", "a totally different error string"));
+  assertEqual(ledgerOf(d).entries.length, 1, "one entry despite differing errors");
+  resolveHook(d, bashSuccess("pnpm -r build"));
+  resolveHook(d, bashSuccess("pnpm -r build"));
+  assertEqual(ledgerOf(d).entries.length, 0, "cleared without ever seeing the error text");
+});
+
+check("a successful Edit, Write, Task or mcp__ call is refused", () => {
+  // These tools are not in the matcher, and the script refuses them anyway in
+  // case a user copies the hook into their own settings with a wider matcher.
+  // Their ledger keys fold errorClass(error) in, so a success -- which carries
+  // no error -- could only reconstruct the wrong key and clear the wrong row.
+  const d = freshDataDir();
+  capture(
+    d,
+    bashFailure("x", "boom", {
+      tool_name: "Edit",
+      tool_input: { file_path: "/a/b.ts", old_string: "a", new_string: "b" },
+    }),
+  );
+  const p = ledgerPathFor(d, PROJECT);
+  const bytesBefore = readFileSync(p);
+  for (const [tool_name, tool_input] of [
+    ["Edit", { file_path: "/a/b.ts", old_string: "a", new_string: "b" }],
+    ["Write", { file_path: "/a/b.ts", content: "x" }],
+    ["Task", { subagent_type: "Explore", prompt: "p" }],
+    ["mcp__github__create_issue", { title: "t" }],
+  ]) {
+    const r = resolveHook(d, bashSuccess("ignored", { tool_name, tool_input }));
+    assertEqual(r.status, 0, `${tool_name} exits 0`);
+  }
+  assert(bytesBefore.equals(readFileSync(p)), "ledger untouched by non-Bash successes");
+});
+
+check("resolve survives junk it is handed", () => {
+  const d = freshDataDir();
+  capture(d, bashFailure("npm test"));
+  const p = ledgerPathFor(d, PROJECT);
+  const bytesBefore = readFileSync(p);
+  for (const junk of ["", "not json", "null", "[]", '{"tool_name":"Bash"}', '{"tool_name":"Bash","tool_input":null}']) {
+    const r = resolveHook(d, junk);
+    assertEqual(r.status, 0, `exits 0 for: ${junk.slice(0, 20)}`);
+  }
+  assert(bytesBefore.equals(readFileSync(p)), "ledger untouched");
+});
+
+check("an interrupted call is not treated as a success", () => {
+  const d = freshDataDir();
+  capture(d, bashFailure("npm test"));
+  capture(d, bashFailure("npm test"));
+  resolveHook(d, bashSuccess("npm test", { is_interrupt: true }));
+  assertEqual(ledgerOf(d).entries[0].count, 2, "count untouched");
+});
+
+check("a success against a foreign schema is ignored", () => {
+  const d = freshDataDir();
+  const p = ledgerPathFor(d, PROJECT);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(
+    p,
+    JSON.stringify({ cwd: PROJECT, schema: 99, entries: [{ tool: "Bash", signature: "npm test", count: 2 }] }, null, 2),
+    "utf8",
+  );
+  const bytesBefore = readFileSync(p);
+  const r = resolveHook(d, bashSuccess("npm test"));
+  assertEqual(r.status, 0, "exits 0");
+  assert(bytesBefore.equals(readFileSync(p)), "left alone for the failure path to deal with");
+});
+
+check("decrementEntry returns null when nothing matches", () => {
+  const entries = [{ tool: "Bash", signature: "a", count: 2 }];
+  assertEqual(decrementEntry(entries, { tool: "Bash", signature: "b" }), null, "unknown signature");
+  assertEqual(decrementEntry(entries, { tool: "Edit", signature: "a" }), null, "right signature, wrong tool");
+  assertEqual(decrementEntry([], { tool: "Bash", signature: "a" }), null, "empty list");
+  assertEqual(decrementEntry(undefined, { tool: "Bash", signature: "a" }), null, "no list at all");
+});
+
+check("decrementEntry does not mutate its input", () => {
+  const entries = [{ tool: "Bash", signature: "a", count: 3, last_seen: "2026-01-01T00:00:00.000Z" }];
+  const out = decrementEntry(entries, { tool: "Bash", signature: "a" });
+  assertEqual(entries[0].count, 3, "original untouched");
+  assertEqual(out[0].count, 2, "copy decremented");
+  assertEqual(out[0].last_seen, "2026-01-01T00:00:00.000Z", "last_seen carried through unchanged");
+});
+
+check("decrementEntry treats a missing count as a single observation", () => {
+  const out = decrementEntry([{ tool: "Bash", signature: "a" }], { tool: "Bash", signature: "a" });
+  assertEqual(out.length, 0, "dropped rather than left at NaN");
+});
+
+check("decrementEntry only touches the row it matched", () => {
+  const entries = [
+    { tool: "Bash", signature: "a", count: 2 },
+    { tool: "Bash", signature: "b", count: 2 },
+  ];
+  const out = decrementEntry(entries, { tool: "Bash", signature: "b" });
+  assertEqual(out[0].count, 2, "a untouched");
+  assertEqual(out[1].count, 1, "b decremented");
+});
+
 check("plugin makes no network calls", () => {
   const banned = [
     "node:http",
@@ -776,7 +1018,7 @@ check("plugin makes no network calls", () => {
     "require('http",
     'require("http',
   ];
-  for (const file of ["lib.mjs", "capture.mjs", "replay.mjs"]) {
+  for (const file of ["lib.mjs", "capture.mjs", "replay.mjs", "resolve.mjs"]) {
     const src = readFileSync(join(PLUGIN, "scripts", file), "utf8");
     for (const needle of banned) {
       assert(!src.includes(needle), `${file} references ${needle}`);
@@ -791,16 +1033,35 @@ check("README documents the caveats a user needs", () => {
   }
 });
 
-check("hooks.json registers both events with no absolute paths", () => {
+// The Bash-only asymmetry is the single thing about this plugin a user is most
+// likely to be surprised by: they fix an Edit failure and it keeps being
+// replayed. Asserted here so the section cannot quietly be dropped -- and
+// resolve.mjs names it by heading in its own header comment.
+check("README documents that only Bash entries self-clear", () => {
+  const readme = readFileSync(join(PLUGIN, "README.md"), "utf8");
+  assert(
+    readme.includes("## What self-clears and what does not"),
+    "README missing the self-clearing section",
+  );
+  assert(readme.includes("Only \`Bash\` entries self-clear"), "README does not state the Bash-only limit");
+  assert(/Three hooks/.test(readme), "README still describes two hooks");
+});
+
+check("hooks.json registers all three events with no absolute paths", () => {
   const raw = readFileSync(join(PLUGIN, "hooks", "hooks.json"), "utf8");
   const hooks = JSON.parse(raw).hooks;
   assert(Array.isArray(hooks.PostToolUseFailure), "PostToolUseFailure present");
+  assert(Array.isArray(hooks.PostToolUse), "PostToolUse present");
   assert(Array.isArray(hooks.SessionStart), "SessionStart present");
   assertEqual(
     hooks.PostToolUseFailure[0].matcher,
     "Bash|Edit|Write|NotebookEdit|Task|mcp__.*",
     "capture matcher",
   );
+  // Exactly Bash, and no wider. Every other tool's ledger key folds the error
+  // text in, so a success could not reconstruct it -- see resolve.mjs.
+  assertEqual(hooks.PostToolUse[0].matcher, "Bash", "resolve matcher is exactly Bash");
+  assertEqual(hooks.PostToolUse.length, 1, "one PostToolUse matcher only");
   assert(hooks.SessionStart[0].matcher === undefined, "SessionStart has no matcher");
   assert(raw.includes("${CLAUDE_PLUGIN_ROOT}"), "uses CLAUDE_PLUGIN_ROOT");
   assert(!/[A-Za-z]:\\\\/.test(raw) && !raw.includes('"/home/') && !raw.includes('"/Users/'), "no absolute paths");
@@ -823,6 +1084,54 @@ check("plugin.json does not re-declare the auto-discovered hooks file", () => {
       `plugin.json declares ${ref}, which is already auto-loaded by convention`,
     );
   }
+});
+
+// --- concurrency ------------------------------------------------------------
+
+console.log("concurrency");
+
+function spawnHook(script, dataDir, payload) {
+  return new Promise((res) => {
+    const child = spawn(process.execPath, [script, dataDir], { stdio: ["pipe", "ignore", "ignore"] });
+    child.on("close", (code) => res(code));
+    child.on("error", () => res(-1));
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
+await checkAsync("a concurrent decrement and capture does not lose a write", async () => {
+  const d = freshDataDir();
+  // Two signatures, seeded well above 1 so that neither run can legitimately
+  // delete a row -- which would make a lost write look like a real clear.
+  seedLedger(d, [
+    { tool: "Bash", signature: "npm test", count: 8, first_seen: iso(2), last_seen: iso(1), error_excerpt: "x" },
+    { tool: "Bash", signature: "git push", count: 8, first_seen: iso(2), last_seen: iso(1), error_excerpt: "y" },
+  ]);
+
+  const jobs = [];
+  for (let i = 0; i < 6; i += 1) {
+    jobs.push(spawnHook(RESOLVE, d, bashSuccess("npm test")));
+    jobs.push(spawnHook(CAPTURE, d, bashFailure("git push")));
+  }
+  const codes = await Promise.all(jobs);
+  for (const code of codes) assertEqual(code, 0, "every hook exited 0");
+
+  const ledger = ledgerOf(d);
+  assert(ledger, "ledger still readable");
+  assertEqual(ledger.schema, SCHEMA, "schema intact");
+  assertEqual(ledger.entries.length, 2, "both rows survived -- no torn or clobbered file");
+
+  const decremented = ledger.entries.find((e) => e.signature === "npm test");
+  const incremented = ledger.entries.find((e) => e.signature === "git push");
+  assert(decremented, "decremented row present");
+  assert(incremented, "incremented row present");
+
+  // The lock drops an observation rather than blocking, so exact totals are not
+  // guaranteed. What must hold is that writes moved in the right direction and
+  // the file is never left corrupt or half-written.
+  assert(decremented.count < 8, `decrements landed (count ${decremented.count})`);
+  assert(decremented.count >= 2, `no row deleted from a count of 8 (count ${decremented.count})`);
+  assert(incremented.count > 8, `increments landed (count ${incremented.count})`);
 });
 
 // --- summary ---------------------------------------------------------------

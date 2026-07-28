@@ -22,12 +22,16 @@ starts, so in the session where you install the plugin it captures nothing.
 
 ## How it works
 
-Two hooks, and nothing else:
+Three hooks, and nothing else:
 
 - **`PostToolUseFailure`** — when a `Bash`, `Edit`, `Write`, `NotebookEdit`,
   `Task`, or MCP tool call fails, the failure is folded into the ledger for the
   current working directory. `Read`, `Glob`, and `Grep` failures are ignored on
   purpose; they fail constantly and mean nothing.
+- **`PostToolUse`** — when a `Bash` command **succeeds**, one observation of that
+  signature is undone, and the entry is dropped once its count reaches zero. See
+  [What self-clears and what does not](#what-self-clears-and-what-does-not) — the
+  asymmetry with the hook above is deliberate.
 - **`SessionStart`** — failures that have happened **at least twice** and were
   last seen **within 30 days** are injected as context. Anything that failed once
   is noise and is not reported.
@@ -63,6 +67,37 @@ is left uncollapsed.
 Other tools are keyed more coarsely, by tool name plus a rough class of error:
 `Edit`, `Write`, and `NotebookEdit` by file extension, `Task` by subagent type,
 MCP tools by the shape of their input.
+
+## What self-clears and what does not
+
+**Only `Bash` entries self-clear.** A `Bash` failure and a later `Bash` success
+can be recognised as the same thing, because the signature for a `Bash` command
+is built from the command text alone. Every other tool's signature folds the
+*class of the error* into the key — an `Edit` that failed because the file was
+missing is a different entry from one that failed on a string mismatch — and a
+success carries no error to classify. There is no key to look up, so nothing is
+decremented. A failed `Edit`, `Write`, `Task`, or MCP call ages out after 30 days
+instead; it is never cleared by a subsequent success.
+
+Within `Bash`, clearing is one-for-one and blunt:
+
+| You did | Ledger |
+| --- | --- |
+| Failed twice, then it works | Entry gone |
+| Failed three times, then it works | `count` drops to 2 — still replayed |
+| Failed three times, works twice | `count` drops to 1 — below the threshold, not replayed |
+| Succeeded on something never recorded | Nothing happens; the file is not touched, and no file is created |
+
+The consequence worth knowing: **a flaky command decays.** Something that fails
+half the time will hover near the threshold and may stop being reported even
+though it is still broken. The alternative — requiring several clean runs before
+clearing — keeps stale reminders alive for days after a real fix, and a reminder
+about a problem you already solved is worse than a missing reminder about one you
+already know is flaky.
+
+A success never refreshes `last_seen`. That field records when the failure last
+happened, and a success is not a failure; touching it would pin a half-cleared
+entry inside the 30-day window indefinitely.
 
 ## What is stored, and where
 
@@ -133,7 +168,7 @@ from one.
 
 ## Failure behaviour
 
-Both hooks exit `0` unconditionally. Malformed input, an unreadable data
+All three hooks exit `0` unconditionally. Malformed input, an unreadable data
 directory, a corrupt ledger, a missing `node` — all of it degrades to doing
 nothing. Neither hook can block a tool call or a session.
 
@@ -154,11 +189,16 @@ is not a failure.
 
 ## Not in scope
 
-It does not record successes, does not notice when you fix something, and has no
-slash command for inspecting the ledger — read the JSON file if you want to see
-it. Recording a failure as "resolved" requires knowing that a later success was
-the same thing as the earlier failure, which the signature alone cannot tell
-you.
+Successes are **not** recorded — a `Bash` success only ever subtracts from an
+entry that already exists, and one that matches nothing is a no-op. Nothing
+counts how often a command works.
+
+There is no slash command for inspecting or editing the ledger; read the JSON
+file if you want to see it, and delete it if you want to start over.
+
+Non-`Bash` failures cannot be cleared by fixing them, only by waiting them out.
+That is a limit of the signature, not an oversight — see [What self-clears and
+what does not](#what-self-clears-and-what-does-not).
 
 ## License
 

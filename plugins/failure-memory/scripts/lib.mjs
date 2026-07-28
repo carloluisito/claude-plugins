@@ -488,6 +488,34 @@ function ageDays(iso, now) {
 }
 
 /**
+ * Undo one observation for `tool`/`signature`.
+ *
+ * Returns a NEW array, or `null` when nothing matched -- the caller uses
+ * `null` to skip the write entirely, so a success against an unknown
+ * signature leaves the ledger byte-identical on disk.
+ *
+ * The entry is removed once its count would reach zero. `last_seen` is
+ * deliberately NOT refreshed: it records when the failure last happened, and a
+ * success is not a failure. Touching it would hold a half-cleared entry inside
+ * the 30-day replay window indefinitely.
+ */
+export function decrementEntry(entries, { tool, signature }) {
+  const list = Array.isArray(entries) ? entries.slice() : [];
+  // Same compound predicate recordEntry() matches on. Matching on signature
+  // alone would let a Bash success clear another tool's row.
+  const idx = list.findIndex((e) => e && e.signature === signature && e.tool === tool);
+  if (idx === -1) return null;
+
+  const count = Number.isFinite(list[idx].count) ? list[idx].count : 0;
+  if (count - 1 <= 0) {
+    list.splice(idx, 1);
+    return list;
+  }
+  list[idx] = { ...list[idx], count: count - 1 };
+  return list;
+}
+
+/**
  * Drop expired entries and cap the list. Eviction removes the least useful
  * first: lowest count, then oldest last_seen.
  */
