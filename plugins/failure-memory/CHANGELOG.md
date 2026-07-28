@@ -5,6 +5,62 @@ All notable changes to this plugin are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-29
+
+### Added
+
+- **`/failure-memory:ledger` — see what is recorded, and forget an entry.** Until
+  now the ledger was write-only from the user's side: the only way to find out
+  why a note kept appearing at session start was to derive a SHA-256 of your own
+  project path and open the JSON by hand. The skill prints every entry for the
+  current project with an id, a count, the dates it was first and last seen, the
+  tool, and the signature; a `*` marks the entries actually replayed, so a note
+  you are seeing can be traced to a row, and a row that is recorded but silent
+  can be ruled out.
+- **`scripts/ledger.mjs list` and `forget <id>`.** The skill is a thin wrapper
+  over a plain CLI, so the same inspection works without it. Ids are derived
+  from entry content, so they survive other entries being removed, and several
+  can be forgotten in one call.
+
+### Notes
+
+- **Forgetting clears the record; it does not add an exception.** The next
+  failure of that call re-creates the entry with a count of one, and a second
+  failure is what puts it back in session context. There is no ignore list, and
+  adding one is a separate decision.
+- **A `forget` that matches some ids and not others says so.** An earlier draft
+  reported only what it removed, so `forget <good> <typo>` printed
+  `Forgot 1 entry:` and never mentioned the typo — the zero-match case reported
+  clearly, the partial-match case did not. Found by running the mixed case; both
+  the reporting and the property that no message conflates the two thresholds
+  are now pinned by tests.
+- **The corrupt- and malformed-ledger messages no longer tell you to delete the
+  file.** Both said "Delete the file to start over", describing manual work that
+  is almost never needed: the hooks' own reader quarantines an unreadable ledger
+  to `<name>.json.corrupt` and starts fresh on the next session start or failed
+  tool call. The messages now say that instead.
+- The entries worth forgetting by hand are the non-`Bash` ones — those are the
+  only ones that never self-clear, because the `PostToolUse` hook that
+  decrements on success matches `Bash` only. A stale `Edit` or MCP entry
+  otherwise keeps asserting something false for up to 30 days.
+- **`list` never writes and never locks.** Reading through the hooks' own
+  `readLedger()` would have quarantined an unparsable file as a side effect of
+  being looked at — correct for a hook that must keep capturing, wrong for an
+  inspector — and taking the lock would have turned "show me the ledger" into a
+  hang behind a stale lockfile. `forget` checks the file exists before locking,
+  because acquiring the lock creates the ledger directory.
+- The skill carries `disable-model-invocation: true`: Claude will not read your
+  ledger unprompted.
+- The empty listing states that the **first** failure creates the ledger, and
+  that two failures are what make an entry *replay*. An earlier draft said the
+  file arrived once a call "fails twice here", conflating the two thresholds;
+  caught by running the skill in a project with no ledger, where the wrong
+  sentence was read back to the user as fact. The wording is now pinned by a test.
+- Its `allowed-tools` rule uses `${CLAUDE_SKILL_DIR}`, which Claude Code only
+  expands there from **v2.1.129**. On older versions the rule does not match and
+  the first run asks permission to execute the script; approving it is the whole
+  fix. No new dependencies.
+
 ## [0.3.1] - 2026-07-29
 
 ### Fixed

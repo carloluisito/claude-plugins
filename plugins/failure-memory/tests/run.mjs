@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   MAX_ENTRIES,
+  MIN_COUNT,
   RENDER_BUDGET,
   SCHEMA,
   decrementEntry,
@@ -26,11 +27,14 @@ import {
   tokenize,
 } from "../scripts/lib.mjs";
 
+import { idFor } from "../scripts/ledger.mjs";
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = join(HERE, "..");
 const CAPTURE = join(PLUGIN, "scripts", "capture.mjs");
 const REPLAY = join(PLUGIN, "scripts", "replay.mjs");
 const RESOLVE = join(PLUGIN, "scripts", "resolve.mjs");
+const LEDGER = join(PLUGIN, "scripts", "ledger.mjs");
 
 let passed = 0;
 const failures = [];
@@ -1226,6 +1230,418 @@ await checkAsync("a concurrent decrement and capture does not lose a write", asy
   assert(decremented.count < 8, `decrements landed (count ${decremented.count})`);
   assert(decremented.count >= 2, `no row deleted from a count of 8 (count ${decremented.count})`);
   assert(incremented.count > 8, `increments landed (count ${incremented.count})`);
+});
+
+// --- ledger cli ------------------------------------------------------------
+
+console.log("ledger cli");
+
+// The CLI hashes the cwd it is actually running in, and the string Node reports
+// there is not always the one handed to spawn (short names, drive-letter case).
+// So ask the child itself, and seed the fixture under exactly that key.
+function childCwd(dir) {
+  const r = spawnSync(process.execPath, ["-e", "process.stdout.write(process.cwd())"], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  return r.stdout;
+}
+
+function freshProjectDir() {
+  const dir = mkdtempSync(join(tmpdir(), "failure-memory-proj-"));
+  TEMP_DIRS.push(dir);
+  return dir;
+}
+
+function fixtureProject() {
+  const dir = freshProjectDir();
+  return { dir, cwd: childCwd(dir) };
+}
+
+function ledgerCli(args, { dataDir, cwd }) {
+  return spawnSync(process.execPath, [LEDGER, ...args, "--data", dataDir], {
+    cwd,
+    encoding: "utf8",
+  });
+}
+
+// Three entries: one replay-eligible, one too rare, one too old.
+function ledgerFixture() {
+  return [
+    { tool: "Bash", signature: "npm test", error_excerpt: "npm: command not found", count: 4, first_seen: iso(9), last_seen: iso(1) },
+    { tool: "Bash", signature: "git push --force origin main", error_excerpt: "GH006 Protected branch update failed", count: 1, first_seen: iso(3), last_seen: iso(3) },
+    { tool: "Write", signature: "Write scripts/ledger.mjs", error_excerpt: "File has not been read yet", count: 3, first_seen: iso(120), last_seen: iso(90) },
+  ];
+}
+
+// Rows are "<mark> <id>  ..." with mark "*" or " ". Match the id shape rather
+// than the leading "* ", or the legend line ("* = replayed into new sessions
+// here: ...") is read as an entry.
+const ROW = /^(\*| ) ([0-9a-f]{8}) /;
+
+function rowIds(stdout, { starred }) {
+  return stdout
+    .split("\n")
+    .map((line) => ROW.exec(line))
+    .filter((m) => m && (m[1] === "*") === starred)
+    .map((m) => m[2])
+    .sort();
+}
+
+function starredIds(stdout) {
+  return rowIds(stdout, { starred: true });
+}
+
+check("list reports a project that has no ledger yet", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const r = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(/No ledger yet/.test(r.stdout), `says so: ${r.stdout}`);
+  assert(r.stdout.includes(ledgerPathFor(d, p.cwd)), "names where it would live");
+});
+
+// The empty listing is the first thing most users see, and whatever it says
+// about when a ledger appears is what they will believe. It said the file
+// arrives once a call "fails twice here", which is the replay threshold, not
+// the creation threshold -- capture writes the file on the first failure. The
+// wrong claim reached the user through the skill, which reads this text aloud.
+check("the empty listing does not confuse creation with the replay threshold", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const before = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+
+  // bashFailure defaults to PROJECT; the failure has to be recorded against the
+  // fixture project the CLI runs in, or the listing below reads a different file.
+  capture(d, bashFailure("npm test", undefined, { cwd: p.cwd }));
+  const after = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+
+  // One failure is enough to create the file, so the empty message must not
+  // tell the user two are needed for it to exist.
+  assert(existsSync(ledgerPathFor(d, p.cwd)), "one failure creates the ledger");
+  assert(!/No ledger yet/.test(after.stdout), `and the listing sees it: ${after.stdout}`);
+  // It should still be honest about what two failures do buy you. The wording of
+  // that claim is checked for every message, not just this one, by "no CLI
+  // message attaches the replay threshold to anything but replay" below -- this
+  // one asserting a single string is what let the same defect come back twice.
+  assert(/replay/.test(before.stdout), `it explains the real threshold: ${before.stdout}`);
+});
+
+// The starred rows are the plugin's claim about what SessionStart will replay.
+// If that claim drifts from selectForReplay() the listing misinforms, which is
+// worse than not having a listing at all.
+check("the starred rows are exactly the rows replay would show", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = ledgerFixture();
+  seedLedger(d, entries, p.cwd);
+
+  const r = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+
+  const expected = selectForReplay(entries).map(idFor).sort();
+  assertEqual(expected.length, 1, "fixture has exactly one eligible entry");
+  assertEqual(starredIds(r.stdout).join(","), expected.join(","), "starred ids");
+  assert(/replayed at session start: 1/.test(r.stdout), "eligible count stated");
+
+  // The other two are listed, just not starred -- an unmarked row is the signal
+  // that an entry is recorded but silent, which is what the skill tells the user.
+  const ineligible = entries.filter((e) => !selectForReplay(entries).includes(e)).map(idFor).sort();
+  assertEqual(rowIds(r.stdout, { starred: false }).join(","), ineligible.join(","), "unstarred ids");
+});
+
+check("every seeded entry appears in the listing, starred or not", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = ledgerFixture();
+  seedLedger(d, entries, p.cwd);
+
+  const r = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+  for (const entry of entries) {
+    assert(r.stdout.includes(idFor(entry)), `id for ${entry.signature} shown`);
+  }
+  assert(/entries:  3/.test(r.stdout), "total stated");
+});
+
+check("a full ledger stays inside the output budget and says what it omitted", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = [];
+  for (let i = 0; i < MAX_ENTRIES; i += 1) {
+    entries.push({
+      tool: "Bash",
+      signature: `command-number-${i} ${"x".repeat(120)}`,
+      error_excerpt: "boom",
+      count: 3,
+      first_seen: iso(5),
+      last_seen: iso(1),
+    });
+  }
+  seedLedger(d, entries, p.cwd);
+
+  const r = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(r.stdout.length < 10_000, `output bounded (${r.stdout.length} chars)`);
+  assert(/not shown/.test(r.stdout), "omission stated rather than silent");
+  assert(r.stdout.includes(ledgerPathFor(d, p.cwd)), "points at the file for the rest");
+});
+
+check("forget removes only the named entry and leaves the others untouched", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = ledgerFixture();
+  const path = seedLedger(d, entries, p.cwd);
+
+  const target = idFor(entries[1]);
+  const r = ledgerCli(["forget", target], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(r.stdout.includes("Forgot 1 entry"), `reports the removal: ${r.stdout}`);
+
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  assertEqual(after.schema, SCHEMA, "schema preserved");
+  assertEqual(after.cwd, p.cwd, "cwd preserved");
+  // Deep equality including key order: counts and timestamps of the survivors
+  // must come through the rewrite unchanged, not recomputed.
+  assertEqual(
+    JSON.stringify(after.entries),
+    JSON.stringify([entries[0], entries[2]]),
+    "survivors byte-identical",
+  );
+});
+
+check("forget takes several ids at once", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = ledgerFixture();
+  const path = seedLedger(d, entries, p.cwd);
+
+  const r = ledgerCli(["forget", idFor(entries[0]), idFor(entries[2])], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  assertEqual(JSON.stringify(after.entries), JSON.stringify([entries[1]]), "one survivor");
+});
+
+// An id is derived from the entry's own content, so removing an unrelated row
+// must not renumber anything. If ids were positional, a listing pasted into a
+// later turn would delete the wrong entry.
+check("an id does not change when an unrelated entry is removed", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = ledgerFixture();
+  seedLedger(d, entries, p.cwd);
+
+  const before = ledgerCli(["list"], { dataDir: d, cwd: p.dir }).stdout;
+  const keeperId = idFor(entries[0]);
+  assert(before.includes(keeperId), "keeper listed before");
+
+  ledgerCli(["forget", idFor(entries[1])], { dataDir: d, cwd: p.dir });
+  const after = ledgerCli(["list"], { dataDir: d, cwd: p.dir }).stdout;
+  assert(after.includes(keeperId), "keeper keeps its id after an unrelated removal");
+});
+
+check("forget with an unknown id changes nothing", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const path = seedLedger(d, ledgerFixture(), p.cwd);
+  const before = readFileSync(path, "utf8");
+
+  const r = ledgerCli(["forget", "deadbeef"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(/Nothing was changed/.test(r.stdout), `says so: ${r.stdout}`);
+  assertEqual(readFileSync(path, "utf8"), before, "file untouched");
+});
+
+check("forget with no id at all changes nothing", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const path = seedLedger(d, ledgerFixture(), p.cwd);
+  const before = readFileSync(path, "utf8");
+
+  const r = ledgerCli(["forget"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(/needs at least one entry id/.test(r.stdout), `asks for one: ${r.stdout}`);
+  assertEqual(readFileSync(path, "utf8"), before, "file untouched");
+});
+
+// A forget that hits some ids and misses others used to report only the hits:
+// "Forgot 1 entry:" then "0 entries left.", with the typo'd id never mentioned.
+// The zero-match case reported clearly and the partial-match case did not, so
+// the failure mode was invisible exactly when it was easiest to make.
+check("forget names the ids it did not find, even when others matched", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = ledgerFixture();
+  const path = seedLedger(d, entries, p.cwd);
+
+  const real = idFor(entries[1]);
+  const r = ledgerCli(["forget", real, "00000000"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(r.stdout.includes("Forgot 1 entry"), `reports the hit: ${r.stdout}`);
+  assert(r.stdout.includes("00000000"), `names the miss: ${r.stdout}`);
+
+  // The hit still has to land, or "report the miss" would be satisfied by
+  // refusing the whole call.
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  assertEqual(
+    JSON.stringify(after.entries),
+    JSON.stringify([entries[0], entries[2]]),
+    "the matched entry is gone and the rest survive",
+  );
+});
+
+// The claim that two failures are what create a record has now been wrong in
+// three different places, because each fix pinned one string. What recurs is
+// the class, so pin the property instead: MIN_COUNT is the replay threshold and
+// nothing else, so any sentence that cites it must be talking about replay.
+check("no CLI message attaches the replay threshold to anything but replay", () => {
+  const p = fixtureProject();
+  const plant = (contents) => {
+    const d = freshDataDir();
+    const f = ledgerPathFor(d, p.cwd);
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, contents, "utf8");
+    return d;
+  };
+  const states = {
+    missing: () => freshDataDir(),
+    empty: () => {
+      const d = freshDataDir();
+      seedLedger(d, [], p.cwd);
+      return d;
+    },
+    ok: () => {
+      const d = freshDataDir();
+      seedLedger(d, ledgerFixture(), p.cwd);
+      return d;
+    },
+    unparsable: () => plant("{ not json at all"),
+    malformed: () => plant(JSON.stringify({ nope: true })),
+    foreign: () => plant(JSON.stringify({ cwd: p.cwd, schema: SCHEMA + 97, entries: [] }, null, 2)),
+  };
+  const invocations = [
+    ["list"],
+    ["forget"],
+    ["forget", "00000000"],
+    ["forget", idFor(ledgerFixture()[1])],
+    ["forget", idFor(ledgerFixture()[1]), "00000000"],
+    ["explode"],
+  ];
+
+  // Built from MIN_COUNT so the test cannot outlive a change to the constant.
+  const threshold = new RegExp(
+    String.raw`\btwice\b|\b${MIN_COUNT}\+?\s*(?:times|observations|failures)\b`,
+    "i",
+  );
+  let cited = 0;
+  for (const [label, make] of Object.entries(states)) {
+    for (const args of invocations) {
+      const d = make();
+      const r = ledgerCli(args, { dataDir: d, cwd: p.dir });
+      assertEqual(r.status, 0, `${label} + ${args.join(" ")} exits 0`);
+      // Per sentence, not per line: the forget advice puts "2 observations" and
+      // "session context" on two different pushed lines.
+      for (const sentence of r.stdout.replace(/\s+/g, " ").split(/(?<=\.)\s+/)) {
+        if (!threshold.test(sentence)) continue;
+        cited += 1;
+        assert(
+          /replay|session/i.test(sentence),
+          `${label} + ${args.join(" ")}: "${sentence.trim()}" cites the threshold without saying it is about replay`,
+        );
+      }
+    }
+  }
+  // Deleting every mention would satisfy the loop above and prove nothing.
+  assert(cited > 0, "the threshold is stated somewhere");
+  const missing = ledgerCli(["list"], { dataDir: freshDataDir(), cwd: p.dir }).stdout;
+  assert(/first failure/i.test(missing), `and creation is stated correctly: ${missing}`);
+});
+
+// Both messages told the user to "Delete the file to start over", which is
+// manual work the plugin already does: readLedger() renames an unreadable
+// ledger to <name>.json.corrupt on the next hook run. Prescribing a
+// destructive step when nothing needs doing is worse than saying nothing.
+check("a broken ledger is explained by the recovery, not by a delete instruction", () => {
+  const p = fixtureProject();
+  const shapes = [
+    ["unparsable", "{ not json at all"],
+    ["malformed", JSON.stringify({ nope: true })],
+  ];
+  for (const [label, contents] of shapes) {
+    const d = freshDataDir();
+    const path = ledgerPathFor(d, p.cwd);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, contents, "utf8");
+
+    const r = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+    assertEqual(r.status, 0, `exit code for ${label}`);
+    assert(r.stdout.includes(".corrupt"), `${label} names where it goes: ${r.stdout}`);
+    assert(
+      !/delete the file/i.test(r.stdout),
+      `${label} must not prescribe a manual delete: ${r.stdout}`,
+    );
+    assertEqual(readFileSync(path, "utf8"), contents, `${label} left the file alone`);
+  }
+});
+
+// readLedger() quarantines a corrupt file by renaming it. That is right for a
+// hook and wrong for an inspector: looking at a broken ledger must not be the
+// thing that moves it out of the way.
+check("a corrupt ledger is reported and left exactly where it is", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const path = ledgerPathFor(d, p.cwd);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "{ not json at all", "utf8");
+
+  for (const args of [["list"], ["forget", "deadbeef"]]) {
+    const r = ledgerCli(args, { dataDir: d, cwd: p.dir });
+    assertEqual(r.status, 0, `exit code for ${args[0]}`);
+    assert(/could not be read|not valid JSON|Nothing was changed/i.test(r.stdout), `${args[0]} explains: ${r.stdout}`);
+    assertEqual(readFileSync(path, "utf8"), "{ not json at all", `${args[0]} left the file alone`);
+    const siblings = readdirSync(dirname(path));
+    assertEqual(
+      siblings.filter((f) => f.endsWith(".corrupt")).length,
+      0,
+      `${args[0]} did not quarantine the file`,
+    );
+  }
+});
+
+check("a ledger from another schema is reported, not overwritten", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const path = ledgerPathFor(d, p.cwd);
+  mkdirSync(dirname(path), { recursive: true });
+  const foreign = JSON.stringify({ cwd: p.cwd, schema: SCHEMA + 97, entries: [] }, null, 2);
+  writeFileSync(path, foreign, "utf8");
+
+  const r = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(/schema/i.test(r.stdout), `mentions the schema: ${r.stdout}`);
+  assertEqual(readFileSync(path, "utf8"), foreign, "file untouched");
+});
+
+// withLock() creates the ledger directory as a side effect. Inspecting a project
+// that has never recorded a failure must not leave a data directory behind.
+check("neither command creates a data directory that did not exist", () => {
+  const parent = freshDataDir();
+  const absent = join(parent, "not-created-yet");
+  const p = fixtureProject();
+
+  for (const args of [["list"], ["forget", "deadbeef"]]) {
+    const r = ledgerCli(args, { dataDir: absent, cwd: p.dir });
+    assertEqual(r.status, 0, `exit code for ${args[0]}`);
+    assertEqual(existsSync(absent), false, `${args[0]} created nothing`);
+  }
+});
+
+check("an unknown command explains itself instead of failing the turn", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const r = ledgerCli(["explode"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(/Unknown command/.test(r.stdout), `names the problem: ${r.stdout}`);
+  assert(/list|forget/.test(r.stdout), "names what it does accept");
 });
 
 // --- summary ---------------------------------------------------------------

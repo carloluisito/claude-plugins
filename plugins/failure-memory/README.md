@@ -99,6 +99,57 @@ A success never refreshes `last_seen`. That field records when the failure last
 happened, and a success is not a failure; touching it would pin a half-cleared
 entry inside the 30-day window indefinitely.
 
+## Seeing and pruning the ledger
+
+```
+/failure-memory:ledger
+```
+
+Prints every entry recorded for the current project: an id, the count, the dates
+it was first and last seen, the tool, and the signature. A `*` marks the entries
+that are actually replayed at session start — an unmarked entry is recorded but
+silent, so it is not the cause of a note you are seeing. `/ledger` on its own
+also works unless something else already claims that name.
+
+The skill carries `disable-model-invocation: true`. Claude will not go looking
+through your ledger on its own; you have to ask.
+
+To drop an entry, name it and the skill runs:
+
+```
+node <plugin>/scripts/ledger.mjs forget <id>
+```
+
+Ids are the eight characters at the start of each row. Several can be passed at
+once. They are derived from the entry's content, so they survive other entries
+being removed but differ from project to project — read them from a listing taken
+in the same directory, never from an older transcript.
+
+Two limits worth knowing before you use it:
+
+- **Forgetting clears the record; it does not add an exception.** The *next*
+  time that call fails the entry is back with a count of one, and a second
+  failure puts it back in your session context. There is no ignore list, and
+  there is no way to tell this plugin to stop watching something.
+- The entries actually worth forgetting by hand are the non-`Bash` ones, because
+  those are the only ones that never clear themselves — see [What self-clears and
+  what does not](#what-self-clears-and-what-does-not). A `Bash` entry usually
+  goes away on its own the next time the command works.
+
+Neither command writes unless you asked to forget something. Listing a corrupt or
+foreign-schema ledger reports the problem and leaves the file byte-for-byte where
+it is; `forget` in a project that has no ledger does not create one.
+
+Two ways it can come out wrong, both recoverable:
+
+- On Claude Code before **v2.1.129** the skill's pre-approval rule is not
+  expanded, so the first run asks permission to execute the script. Approving it
+  is the whole fix.
+- With `disableSkillShellExecution` set, the listing arrives as
+  `[shell command execution disabled by policy]`. The skill then runs the same
+  command as an ordinary Bash call, and if that is also blocked, falls back to
+  reading the JSON directly — which you can always do yourself.
+
 ## What is stored, and where
 
 One JSON file per project directory, under the plugin's data directory. For a
@@ -161,7 +212,7 @@ That is the whole data model. Stored per failure: the tool name, the normalized
 signature, a clipped error excerpt, a count, and two timestamps.
 
 **Nothing leaves your machine.** There is no network call anywhere in this
-plugin, and no telemetry. You can verify that in `scripts/` — it is about 400
+plugin, and no telemetry. You can verify that in `scripts/` — it is about 1,300
 lines of plain Node with zero dependencies.
 
 Text is run through a redaction pass before it is written, covering
@@ -224,9 +275,12 @@ Successes are **not** recorded — a `Bash` success only ever subtracts from an
 entry that already exists, and one that matches nothing is a no-op. Nothing
 counts how often a command works.
 
-There is no slash command for inspecting or editing the ledger. Read the JSON
-file if you want to see it — [What is stored, and where](#what-is-stored-and-where)
-gives the full path — and delete it if you want to start over.
+Editing the ledger is limited to removing whole entries — see [Seeing and pruning
+the ledger](#seeing-and-pruning-the-ledger). A count cannot be adjusted, a
+signature cannot be rewritten, and nothing can be added by hand. The JSON file is
+always readable directly if you want the raw view; [What is stored, and
+where](#what-is-stored-and-where) gives the path, and deleting the file starts
+over.
 
 Non-`Bash` failures cannot be cleared by fixing them, only by waiting them out.
 That is a limit of the signature, not an oversight — see [What self-clears and
