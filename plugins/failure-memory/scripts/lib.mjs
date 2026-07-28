@@ -15,7 +15,10 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export const SCHEMA = 1;
+// Bumped to 2 when signatures gained pipeline-stage cutting and flag-order
+// collapsing. Those change what key a command produces, so a schema-1 ledger is
+// read as empty rather than merged -- see readLedger.
+export const SCHEMA = 2;
 
 // Hard caps. See README "Limits".
 export const MAX_ENTRIES = 200; // per project ledger
@@ -101,6 +104,156 @@ export function dropOperands(command) {
   return m ? command.slice(0, m.index) : command;
 }
 
+/**
+ * Walk a command left to right, tracking quote state.
+ *
+ * Returns `{ cut, open }` where `cut` is the index of the first unquoted
+ * pipeline/list separator (or -1) and `open` is true if a quote was still open
+ * at the end of the string. A backslash outside single quotes escapes the next
+ * character; that only ever *prevents* a cut, which is the safe direction.
+ *
+ * Every branch is a plain character comparison, so this cannot throw on any
+ * input.
+ */
+function scanCommand(command) {
+  const s = String(command ?? "");
+  let quote = ""; // "" | "'" | '"'
+  let cut = -1;
+
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+
+    if (quote === "'") {
+      if (c === "'") quote = "";
+      continue;
+    }
+
+    if (c === "\\") {
+      i += 1; // skip the escaped character
+      continue;
+    }
+
+    if (quote === '"') {
+      if (c === '"') quote = "";
+      continue;
+    }
+
+    if (c === "'" || c === '"') {
+      quote = c;
+      continue;
+    }
+
+    if (cut === -1 && (c === "|" || c === ";" || (c === "&" && s[i + 1] === "&"))) {
+      cut = i;
+    }
+  }
+
+  return { cut, open: quote !== "" };
+}
+
+/**
+ * Keep only the first stage of a pipeline or command list.
+ *
+ * `npm test | tee out.log`, `npm test && npm run lint` and `make build; make
+ * test` all record against the command that actually failed first, so they
+ * collapse onto the same entry as the bare command. Separators inside quotes are
+ * left alone, so `echo "a && b"` stays distinct from `echo "a"`.
+ *
+ * If a quote is still open at the end of the string the command is malformed and
+ * no cut is made at all: guessing where the quote was meant to close is how you
+ * merge two unrelated failures.
+ */
+export function firstStage(command) {
+  const s = String(command ?? "");
+  const { cut, open } = scanCommand(s);
+  if (open || cut === -1) return s;
+  return s.slice(0, cut);
+}
+
+/**
+ * Split a command on whitespace that is not inside quotes. Quoted runs stay in
+ * the token that contains them, quotes included, so `echo "a b"` is two tokens
+ * and not three.
+ */
+export function tokenize(command) {
+  const s = String(command ?? "");
+  const tokens = [];
+  let current = "";
+  let quote = "";
+
+  const flush = () => {
+    if (current) tokens.push(current);
+    current = "";
+  };
+
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s[i];
+
+    if (quote === "'") {
+      current += c;
+      if (c === "'") quote = "";
+      continue;
+    }
+
+    if (c === "\\") {
+      current += c;
+      if (i + 1 < s.length) {
+        current += s[i + 1];
+        i += 1;
+      }
+      continue;
+    }
+
+    if (quote === '"') {
+      current += c;
+      if (c === '"') quote = "";
+      continue;
+    }
+
+    if (c === "'" || c === '"') {
+      quote = c;
+      current += c;
+      continue;
+    }
+
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+      flush();
+      continue;
+    }
+
+    current += c;
+  }
+
+  flush();
+  return tokens;
+}
+
+/**
+ * Collapse flag order so `cargo build --release --locked` and
+ * `cargo build --locked --release` land on one entry.
+ *
+ * The leading run of tokens that do not start with `-` is the command itself and
+ * keeps its order. The tail is sorted **only if every token in it is a flag**.
+ * That guard is the whole point: in `git commit -m one` the `one` is a flag's
+ * value, and sorting it would merge two different commits into one entry. When
+ * in doubt this leaves the tail exactly as written -- an untidy duplicate row is
+ * recoverable, a wrongly merged row produces advice about a command the user
+ * never ran.
+ */
+export function sortFlags(command) {
+  const tokens = tokenize(command);
+  let i = 0;
+  while (i < tokens.length && !tokens[i].startsWith("-")) i += 1;
+
+  const head = tokens.slice(0, i);
+  const tail = tokens.slice(i);
+  if (tail.length < 2 || !tail.every((t) => t.startsWith("-"))) {
+    return tokens.join(" ");
+  }
+
+  return [...head, ...tail.slice().sort()].join(" ");
+}
+
 /** A coarse class for an error string, used to key non-Bash tools. */
 export function errorClass(error) {
   const e = String(error ?? "").toLowerCase();
@@ -129,7 +282,7 @@ export function signatureFor(toolName, toolInput, error) {
   let sig;
 
   if (toolName === "Bash") {
-    sig = normalizeText(dropOperands(String(input.command ?? "")));
+    sig = normalizeText(sortFlags(dropOperands(firstStage(String(input.command ?? "")))));
     if (!sig) sig = "(empty command)";
   } else if (toolName === "Edit" || toolName === "Write" || toolName === "NotebookEdit") {
     const ext = extensionOf(input.file_path ?? input.notebook_path ?? "");
@@ -203,10 +356,18 @@ export function readLedger(path, cwd) {
     return emptyLedger(cwd);
   }
 
-  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.entries) || parsed.schema !== SCHEMA) {
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.entries)) {
     quarantine(path);
     return emptyLedger(cwd);
   }
+
+  // A ledger from another schema is not corrupt -- its entries are keyed by
+  // rules this version no longer uses, so counts from it cannot be added to
+  // counts from this version. Read it as empty and let the next write replace
+  // it. Deliberately *not* quarantined: nothing here is broken, and a schema
+  // higher than ours means a newer version of this plugin owns the file and
+  // will want it intact.
+  if (parsed.schema !== SCHEMA) return emptyLedger(cwd);
 
   return {
     cwd: typeof parsed.cwd === "string" && parsed.cwd ? parsed.cwd : String(cwd ?? ""),
@@ -360,17 +521,37 @@ export function selectForReplay(entries, nowMs = Date.now()) {
  * deterministically so the result never exceeds RENDER_BUDGET characters.
  * Returns "" when there is nothing to say.
  */
+/**
+ * Format a stored timestamp as YYYY-MM-DD, or "" if it is absent or
+ * unparseable. Never yields "Invalid Date", "NaN" or "undefined": a date this
+ * plugin cannot vouch for is a date it does not print.
+ */
+export function shortDate(value) {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+  const ms = new Date(value ?? "").getTime();
+  if (!Number.isFinite(ms)) return "";
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
 export function renderContext(selected) {
   if (selected.length === 0) return "";
 
+  // Deliberately a statement of fact, not an instruction. This text is injected
+  // from a ledger that can be weeks stale, and the user never sees it. Stale
+  // observations get weighed and discarded; a stale instruction steers the model
+  // wrong with nothing on screen to explain why.
   const header =
-    "Recurring tool failures in this project (from failure-memory, local only). " +
-    "Consider these before repeating the same approach:";
+    "Recorded by failure-memory (local only): tool calls that have failed more " +
+    "than once in this project.";
   const lines = [];
   let used = header.length;
 
   for (const e of selected) {
-    const line = `- ${e.tool}: ${e.signature} (failed ${e.count}x, last ${String(e.last_seen).slice(0, 10)}) -- ${e.error_excerpt}`;
+    const first = shortDate(e.first_seen);
+    const last = shortDate(e.last_seen);
+    const dates = [first && `first ${first}`, last && `last ${last}`].filter(Boolean);
+    const when = dates.length > 0 ? `, ${dates.join(", ")}` : "";
+    const line = `- ${e.tool}: ${e.signature} (failed ${e.count}x${when}) -- ${e.error_excerpt}`;
     const clipped = line.length > 240 ? `${line.slice(0, 237)}...` : line;
     if (used + clipped.length + 1 > RENDER_BUDGET) break;
     lines.push(clipped);

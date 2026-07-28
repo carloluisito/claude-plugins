@@ -11,12 +11,17 @@ import { fileURLToPath } from "node:url";
 import {
   MAX_ENTRIES,
   RENDER_BUDGET,
+  SCHEMA,
+  firstStage,
   ledgerPathFor,
   normalizeText,
   redact,
   renderContext,
   selectForReplay,
+  shortDate,
   signatureFor,
+  sortFlags,
+  tokenize,
 } from "../scripts/lib.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -98,7 +103,7 @@ function bashFailure(command, error = "Command exited with non-zero status code 
 function seedLedger(dataDir, entries, cwd = PROJECT) {
   const p = ledgerPathFor(dataDir, cwd);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify({ cwd, schema: 1, entries }, null, 2), "utf8");
+  writeFileSync(p, JSON.stringify({ cwd, schema: SCHEMA, entries }, null, 2), "utf8");
   return p;
 }
 
@@ -116,7 +121,7 @@ check("first failure creates one entry with count 1", () => {
   assertEqual(r.status, 0, "exit code");
   const l = ledgerOf(d);
   assert(l, "ledger written");
-  assertEqual(l.schema, 1, "schema");
+  assertEqual(l.schema, SCHEMA, "schema");
   assertEqual(l.cwd, PROJECT, "cwd recorded in plain text");
   assertEqual(l.entries.length, 1, "entry count");
   assertEqual(l.entries[0].count, 1, "count");
@@ -146,6 +151,29 @@ check("varying operands collapse onto one entry", () => {
   assertEqual(l.entries.length, 1, "one entry");
   assertEqual(l.entries[0].count, 2, "count");
   assertEqual(l.entries[0].signature, "npm test", "signature dropped operands");
+  rmSync(d, { recursive: true, force: true });
+});
+
+check("a pipeline and its bare first stage reach count 2 in the ledger", () => {
+  // The end-to-end version of the unit tests below: two invocations that a user
+  // would call "the same failure" must reach MIN_COUNT, or nothing is replayed.
+  const d = freshDataDir();
+  capture(d, bashFailure("npm test | tee out.log"));
+  capture(d, bashFailure("npm test"));
+  const l = ledgerOf(d);
+  assertEqual(l.entries.length, 1, "one entry");
+  assertEqual(l.entries[0].count, 2, "count reaches the replay threshold");
+  assertEqual(l.entries[0].signature, "npm test", "signature is the failing stage");
+  rmSync(d, { recursive: true, force: true });
+});
+
+check("reordered flags reach count 2 in the ledger", () => {
+  const d = freshDataDir();
+  capture(d, bashFailure("cargo build --release --locked"));
+  capture(d, bashFailure("cargo build --locked --release"));
+  const l = ledgerOf(d);
+  assertEqual(l.entries.length, 1, "one entry");
+  assertEqual(l.entries[0].count, 2, "count");
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -238,15 +266,62 @@ check("corrupt ledger is moved aside and capture recovers", () => {
   rmSync(d, { recursive: true, force: true });
 });
 
-check("ledger with a foreign shape is recovered too", () => {
+check("ledger with a foreign shape is quarantined and recovered", () => {
   const d = freshDataDir();
   const p = ledgerPathFor(d, PROJECT);
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify({ schema: 99, whatever: true }), "utf8");
   capture(d, bashFailure("npm test"));
+  assert(existsSync(`${p}.corrupt`), "unusable shape quarantined");
   const l = ledgerOf(d);
-  assertEqual(l.schema, 1, "schema reset");
+  assertEqual(l.schema, SCHEMA, "schema reset");
   assertEqual(l.entries.length, 1, "entry recorded");
+  rmSync(d, { recursive: true, force: true });
+});
+
+// A ledger written by another version of this plugin is well-formed but keyed by
+// rules we no longer use. It is read as empty so old and new counts never mix --
+// and *not* quarantined, because nothing about it is broken.
+check("ledger from an older schema reads as empty without quarantining", () => {
+  const d = freshDataDir();
+  const p = ledgerPathFor(d, PROJECT);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(
+    p,
+    JSON.stringify({
+      cwd: PROJECT,
+      schema: SCHEMA - 1,
+      entries: [
+        {
+          tool: "Bash",
+          signature: "npm test && npm run lint",
+          error_class: "unknown",
+          error_excerpt: "boom",
+          count: 7,
+          first_seen: iso(5),
+          last_seen: iso(1),
+        },
+      ],
+    }),
+    "utf8",
+  );
+  capture(d, bashFailure("npm test"));
+  assert(!existsSync(`${p}.corrupt`), "not quarantined -- it was never corrupt");
+  const l = ledgerOf(d);
+  assertEqual(l.schema, SCHEMA, "schema rewritten");
+  assertEqual(l.entries.length, 1, "old entries dropped");
+  assertEqual(l.entries[0].count, 1, "count restarts rather than inheriting 7");
+  rmSync(d, { recursive: true, force: true });
+});
+
+check("ledger from a newer schema is left intact on disk, not quarantined", () => {
+  const d = freshDataDir();
+  const p = ledgerPathFor(d, PROJECT);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ cwd: PROJECT, schema: SCHEMA + 1, entries: [] }), "utf8");
+  const r = capture(d, bashFailure("npm test"));
+  assertEqual(r.status, 0, "exit code");
+  assert(!existsSync(`${p}.corrupt`), "a newer version's ledger is not destroyed");
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -472,6 +547,206 @@ check("signatureFor does not confuse --flags with a bare --", () => {
 check("signatureFor is clamped", () => {
   const sig = signatureFor("Bash", { command: "x".repeat(5000) }, "exit 1");
   assert(sig.length <= 200, `signature length ${sig.length}`);
+});
+
+// --- signature normalization (issue #3) ------------------------------------
+//
+// Each pair below is the whole point of the feature. When two invocations of the
+// same failing command produce two signatures, they land as two entries of count
+// 1, MIN_COUNT is never reached, and nothing is ever replayed -- the plugin
+// silently does nothing. Where a pair is genuinely ambiguous the rule errs toward
+// keeping them apart: a duplicate row is untidy, but a wrongly merged row gives
+// advice about a command the user never ran.
+
+const sigOf = (command) => signatureFor("Bash", { command }, "exit 1");
+
+const COLLAPSES = [
+  ["flag order", "cargo build --release --locked", "cargo build --locked --release"],
+  ["&& list", "npm test && npm run lint", "npm test"],
+  ["flag order with values", "pytest -x --maxfail=1", "pytest --maxfail=3 -x"],
+  ["pipeline", "npm test | tee out.log", "npm test"],
+  ["; list", "make build; make test", "make build"],
+];
+
+for (const [label, a, b] of COLLAPSES) {
+  check(`signatureFor collapses ${label}: ${a} == ${b}`, () => {
+    assertEqual(sigOf(a), sigOf(b), `"${a}" vs "${b}"`);
+  });
+}
+
+const STAY_DISTINCT = [
+  ["different scripts", "npm test", "npm run build"],
+  ["flag values that are not flags", "git commit -m one", "git commit -m two"],
+  ["different file operands", "node scripts/build.mjs", "node scripts/test.mjs"],
+  ["separator inside quotes", 'echo "a && b"', 'echo "a"'],
+];
+
+for (const [label, a, b] of STAY_DISTINCT) {
+  check(`signatureFor keeps ${label} distinct: ${a} != ${b}`, () => {
+    assert(sigOf(a) !== sigOf(b), `both collapsed to "${sigOf(a)}"`);
+  });
+}
+
+check("an unterminated quote is left uncut rather than guessed at", () => {
+  // Cutting here would mean inventing where the quote was meant to close, which
+  // is how two unrelated failures get merged. capture.mjs must also survive it.
+  const sig = sigOf('npm test "unterminated');
+  assert(sig.includes("unterminated"), `command was cut: ${sig}`);
+  assert(sigOf('npm test "unterminated') !== sigOf("npm test"), "not merged with the bare command");
+});
+
+check("a command that is only a separator still yields a signature", () => {
+  assertEqual(sigOf("| npm test"), "(empty command)", "empty first stage");
+  assertEqual(sigOf(""), "(empty command)", "empty command");
+});
+
+check("normalization never throws on adversarial input", () => {
+  const nasty = [
+    "",
+    " ",
+    "|",
+    ";;;",
+    "&&",
+    '"',
+    "'",
+    "\\",
+    "\\\\|",
+    'a "b \'c |; && \\',
+    "-".repeat(500),
+    "| | | ; && '",
+    "npm test 'a\\'b'",
+    " [31m|",
+    "x".repeat(10_000),
+  ];
+  for (const command of nasty) {
+    const sig = signatureFor("Bash", { command }, "exit 1");
+    assert(typeof sig === "string" && sig.length > 0, `no signature for ${JSON.stringify(command)}`);
+    assert(sig.length <= 200, `signature too long for ${JSON.stringify(command)}`);
+  }
+});
+
+check("tokenize keeps quoted runs in one token", () => {
+  assertEqual(tokenize('echo "a b"').length, 2, 'echo "a b"');
+  assertEqual(tokenize("echo 'a b' c").join("|"), "echo|'a b'|c", "single quotes");
+  assertEqual(tokenize("  a   b  ").join("|"), "a|b", "collapses whitespace");
+  assertEqual(tokenize("a\\ b").length, 1, "escaped space does not split");
+  assertEqual(tokenize("").length, 0, "empty");
+});
+
+check("firstStage cuts only on unquoted separators", () => {
+  assertEqual(firstStage("a && b"), "a ", "&&");
+  assertEqual(firstStage("a | b"), "a ", "pipe");
+  assertEqual(firstStage("a ; b"), "a ", "semicolon");
+  assertEqual(firstStage('a "b && c"'), 'a "b && c"', "quoted && untouched");
+  assertEqual(firstStage("a 'b | c'"), "a 'b | c'", "quoted pipe untouched");
+  assertEqual(firstStage("a \\| b"), "a \\| b", "escaped pipe untouched");
+  assertEqual(firstStage("a & b"), "a & b", "single & is not a separator we cut on");
+  assertEqual(firstStage('a "unterminated | b'), 'a "unterminated | b', "open quote: no cut");
+});
+
+check("sortFlags sorts a pure flag tail and leaves a mixed tail alone", () => {
+  assertEqual(sortFlags("cmd --b --a"), "cmd --a --b", "pure flag tail sorted");
+  assertEqual(sortFlags("cmd -b -a -c"), "cmd -a -b -c", "short flags sorted");
+  assertEqual(sortFlags("cmd --flag value"), "cmd --flag value", "flag with a value untouched");
+  assertEqual(sortFlags("cmd b a"), "cmd b a", "no flags at all untouched");
+  assertEqual(sortFlags("cmd --only"), "cmd --only", "single flag untouched");
+  assertEqual(sortFlags(""), "", "empty");
+});
+
+check("shortDate never prints Invalid Date, NaN or undefined", () => {
+  assertEqual(shortDate("2026-07-28T10:11:12.000Z"), "2026-07-28", "iso timestamp");
+  assertEqual(shortDate("2026-07-28"), "2026-07-28", "bare date");
+  for (const bad of [undefined, null, "", "not a date", {}, NaN, "0000-13-45T99"]) {
+    const out = shortDate(bad);
+    assert(typeof out === "string", `non-string for ${JSON.stringify(bad)}`);
+    for (const needle of ["Invalid", "NaN", "undefined"]) {
+      assert(!out.includes(needle), `${JSON.stringify(bad)} -> "${out}" contains ${needle}`);
+    }
+  }
+});
+
+// --- rendered context (issue #3, D4) ---------------------------------------
+
+check("rendered lines carry the count and both dates", () => {
+  const ctx = renderContext([
+    {
+      tool: "Bash",
+      signature: "npm test",
+      count: 4,
+      first_seen: "2026-06-01T00:00:00.000Z",
+      last_seen: "2026-07-20T00:00:00.000Z",
+      error_excerpt: "exit 1",
+    },
+  ]);
+  assert(ctx.includes("4x"), `count missing: ${ctx}`);
+  assert(ctx.includes("first 2026-06-01"), `first_seen missing: ${ctx}`);
+  assert(ctx.includes("last 2026-07-20"), `last_seen missing: ${ctx}`);
+});
+
+check("an entry with no first_seen still renders cleanly", () => {
+  // Entries written by an earlier build, or a ledger hand-edited by a user, can
+  // be missing a date. Printing "first Invalid Date" would be worse than
+  // printing no date at all.
+  const ctx = renderContext([
+    { tool: "Bash", signature: "npm test", count: 2, last_seen: "2026-07-20T00:00:00.000Z", error_excerpt: "boom" },
+  ]);
+  for (const needle of ["Invalid Date", "NaN", "undefined"]) {
+    assert(!ctx.includes(needle), `rendered "${needle}": ${ctx}`);
+  }
+  assert(ctx.includes("last 2026-07-20"), "the date it does have is still shown");
+  assert(!ctx.includes("first "), "no empty first clause");
+});
+
+check("an entry with no dates at all renders without a dangling comma", () => {
+  const ctx = renderContext([
+    { tool: "Bash", signature: "npm test", count: 2, error_excerpt: "boom" },
+  ]);
+  assert(ctx.includes("(failed 2x)"), `malformed count clause: ${ctx}`);
+});
+
+check("the injected header is an observation, not an instruction", () => {
+  const ctx = renderContext([
+    { tool: "Bash", signature: "npm test", count: 2, last_seen: iso(1), error_excerpt: "boom" },
+  ]);
+  const header = ctx.split("\n")[0];
+  // The user never sees injected context. A stale instruction steers the model
+  // with nothing on screen to explain why; a stale observation can be weighed
+  // and discarded. Only our own template text is checked -- error_excerpt is
+  // verbatim tool output and may contain an imperative of its own.
+  const imperatives = [
+    "avoid ",
+    "do not ",
+    "don't ",
+    "you should",
+    "make sure",
+    "remember to",
+    "be careful",
+    "consider ",
+    "try ",
+    "use ",
+    "prefer ",
+    "always ",
+    "never ",
+  ];
+  const lower = header.toLowerCase();
+  for (const needle of imperatives) {
+    assert(!lower.includes(needle), `header instructs ("${needle}"): ${header}`);
+  }
+  assert(lower.includes("failed"), `header does not state the fact: ${header}`);
+});
+
+check("rendered context stays inside RENDER_BUDGET", () => {
+  const entries = Array.from({ length: 200 }, (_, i) => ({
+    tool: "Bash",
+    signature: `command number ${i} ${"y".repeat(150)}`,
+    count: 5,
+    first_seen: iso(10),
+    last_seen: iso(1),
+    error_excerpt: "z".repeat(300),
+  }));
+  const ctx = renderContext(entries);
+  assert(ctx.length <= RENDER_BUDGET, `rendered ${ctx.length} > ${RENDER_BUDGET}`);
+  assert(ctx.split("\n").length > 1, "at least one entry still rendered");
 });
 
 check("selectForReplay filters on count and recency", () => {
