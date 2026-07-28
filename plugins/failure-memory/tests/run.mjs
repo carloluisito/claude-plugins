@@ -531,6 +531,25 @@ check("hooks.json registers both events with no absolute paths", () => {
   assert(!/[A-Za-z]:\\\\/.test(raw) && !raw.includes('"/home/') && !raw.includes('"/Users/'), "no absolute paths");
 });
 
+check("plugin.json does not re-declare the auto-discovered hooks file", () => {
+  // Regression: declaring "hooks": "./hooks/hooks.json" in plugin.json makes
+  // Claude Code refuse to load the plugin entirely -- "Duplicate hooks file
+  // detected: ... resolves to already-loaded file". hooks/hooks.json is picked
+  // up by convention; manifest.hooks is only for ADDITIONAL hook files.
+  // Every repo validator passed while the plugin could not load at all.
+  const manifest = JSON.parse(readFileSync(join(PLUGIN, ".claude-plugin", "plugin.json"), "utf8"));
+  const declared = manifest.hooks;
+  if (declared === undefined) return;
+  const refs = Array.isArray(declared) ? declared : [declared];
+  for (const ref of refs) {
+    const normalized = String(ref).replace(/\\/g, "/").replace(/^\.\//, "");
+    assert(
+      normalized !== "hooks/hooks.json",
+      `plugin.json declares ${ref}, which is already auto-loaded by convention`,
+    );
+  }
+});
+
 // --- summary ---------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
