@@ -5,5 +5,22 @@
     "url": "https://github.com/carloluisito"
   },
   "description": "Open-source plugins for Claude Code.",
-  "plugins": []
+  "plugins": [
+    {
+      "name": "failure-memory",
+      "source": "./plugins/failure-memory",
+      "version": "0.1.0",
+      "description": "Remembers tool calls that keep failing in a project and reminds you at the start of the next session. Local only, no network.",
+      "author": {
+        "name": "carloluisito",
+        "url": "https://github.com/carloluisito"
+      },
+      "keywords": [
+        "hooks",
+        "memory",
+        "failures",
+        "context"
+      ]
+    }
+  ]
 }

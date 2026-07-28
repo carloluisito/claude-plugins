@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash|Edit|Write|NotebookEdit|Task|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/capture.mjs\" \"${CLAUDE_PLUGIN_DATA}\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/replay.mjs\" \"${CLAUDE_PLUGIN_DATA}\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
