@@ -69,8 +69,27 @@ function assertEqual(actual, expected, msg) {
 
 // --- harness ---------------------------------------------------------------
 
+// Every temp dir this suite creates is registered here and removed once at the
+// end of the run. Individual tests may still clean up early to keep disk use
+// low during a run, but correctness must not depend on them: check() swallows a
+// thrown assertion, so a failing test would otherwise skip its own trailing
+// rmSync, and a new test that simply forgets to clean up would leak silently.
+const TEMP_DIRS = [];
+
 function freshDataDir() {
-  return mkdtempSync(join(tmpdir(), "failure-memory-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "failure-memory-test-"));
+  TEMP_DIRS.push(dir);
+  return dir;
+}
+
+function cleanupTempDirs() {
+  for (const dir of TEMP_DIRS) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best effort. A directory we cannot remove must not fail the suite.
+    }
+  }
 }
 
 const PROJECT = "/tmp/fixture-project";
@@ -1179,6 +1198,16 @@ await checkAsync("a concurrent decrement and capture does not lose a write", asy
 });
 
 // --- summary ---------------------------------------------------------------
+
+cleanupTempDirs();
+check("the suite leaves no temp directories behind", () => {
+  const leaked = TEMP_DIRS.filter((dir) => existsSync(dir));
+  assertEqual(
+    leaked.length,
+    0,
+    `leaked ${leaked.length} of ${TEMP_DIRS.length} temp dirs, e.g. ${leaked[0]}`,
+  );
+});
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) process.exit(1);
