@@ -4,7 +4,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,6 +18,7 @@ import {
   normalizeText,
   redact,
   renderContext,
+  resolveDataDir,
   selectForReplay,
   shortDate,
   signatureFor,
@@ -1037,6 +1038,49 @@ check("README documents the caveats a user needs", () => {
 // likely to be surprised by: they fix an Edit failure and it keeps being
 // replayed. Asserted here so the section cannot quietly be dropped -- and
 // resolve.mjs names it by heading in its own header comment.
+// The README's one verification step is "open the ledger file", so the path it
+// gives has to be one a reader can actually resolve. Both documented paths are
+// pinned here, and the fallback is asserted against the code that produces it so
+// the two cannot drift apart in silence.
+check("README gives a ledger path a reader can resolve", () => {
+  const readme = readFileSync(join(PLUGIN, "README.md"), "utf8");
+  const manifest = JSON.parse(
+    readFileSync(join(PLUGIN, ".claude-plugin", "plugin.json"), "utf8"),
+  );
+
+  assert(
+    !readme.includes("<plugin data dir>"),
+    "README still uses the unresolved <plugin data dir> placeholder",
+  );
+
+  // Normal install. Claude Code derives the directory name from the plugin
+  // identifier "<plugin>@<marketplace>"; the marketplace name is frozen.
+  const installed = `~/.claude/plugins/data/${manifest.name}-carloluisito-plugins/ledger/`;
+  assert(readme.includes(installed), `README does not document the installed path: ${installed}`);
+
+  // Fallback, for when ${CLAUDE_PLUGIN_DATA} does not expand. Compare against
+  // what resolveDataDir() really returns rather than a copy of it.
+  const saved = process.env.CLAUDE_PLUGIN_DATA;
+  delete process.env.CLAUDE_PLUGIN_DATA;
+  let actual;
+  try {
+    actual = resolveDataDir(undefined);
+  } finally {
+    if (saved !== undefined) process.env.CLAUDE_PLUGIN_DATA = saved;
+  }
+  assert(
+    actual === join(homedir(), ".claude", "plugins", "data", manifest.name),
+    `fallback data dir moved to ${actual}; README says ~/.claude/plugins/data/${manifest.name}`,
+  );
+  assert(
+    readme.includes(`~/.claude/plugins/data/${manifest.name}/ledger/`),
+    "README does not document the fallback path",
+  );
+
+  // ~/.claude is a default, not a fixed root.
+  assert(readme.includes("CLAUDE_CONFIG_DIR"), "README does not mention the config-dir override");
+});
+
 check("README documents that only Bash entries self-clear", () => {
   const readme = readFileSync(join(PLUGIN, "README.md"), "utf8");
   assert(
