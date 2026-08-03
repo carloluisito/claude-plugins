@@ -5,7 +5,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import * as lib from "../scripts/lib.mjs";
@@ -1951,6 +1951,120 @@ check("every exported numeric constant is documented", () => {
       .map((key) => `${key}=${lib[key]}`)
       .join(", ")} -- document each in README.md and add it to DOCUMENTED_CONSTANTS in tests/run.mjs`,
   );
+});
+
+// --- the ledger skill's path to its script (issue #21) ---------------------
+
+// skills/ledger/SKILL.md reaches its CLI by walking up out of its own directory:
+// node "${CLAUDE_SKILL_DIR}/../../scripts/ledger.mjs". Nothing about that string is
+// checked at load time, so moving the skill a level, renaming scripts/, or splitting
+// the CLI breaks it in two ways at once and silently:
+//
+//   1. the allowed-tools Bash rule stops matching the command in the body, so every
+//      invocation of the skill prompts the user for permission; and
+//   2. the executable fence runs node against a path that does not exist.
+//
+// Neither shows up in the rest of this suite -- it exercises scripts/ledger.mjs
+// directly and never reads SKILL.md. These checks close that gap.
+//
+// ${CLAUDE_SKILL_DIR} is the SKILL's OWN directory, not the plugin root
+// (docs: /docs/en/skills, "Skill directory placeholder"). Substituting the plugin
+// root here would make the ../../ walk resolve two levels too high and the check
+// would pass on a layout that is actually broken.
+
+const SKILL_DIR = join(PLUGIN, "skills", "ledger");
+const SKILL_MD = readFileSync(join(SKILL_DIR, "SKILL.md"), "utf8");
+
+// Every place SKILL.md names the CLI today: the allowed-tools rule in the
+// frontmatter, the executable fence, the copy-paste fallback, and the forget
+// example. Asserted as an exact count, not a floor: a floor still passes if an edit
+// adds a path this regex happens to catch and drops one it does not.
+const SKILL_LEDGER_CALLS = 4;
+
+const LEDGER_CALL = /node\s+"([^"\n]*ledger\.mjs)"/;
+
+// (path, 1-based line number, whether the line sits inside an auto-run ```! fence)
+const skillCalls = [];
+let allowedToolsCall = null;
+let fence = null; // null | "plain" | "bang"
+
+SKILL_MD.split(/\r?\n/).forEach((line, index) => {
+  const fenceOpen = /^\s*```(!?)/.exec(line);
+  if (fenceOpen) {
+    fence = fence ? null : fenceOpen[1] === "!" ? "bang" : "plain";
+    return;
+  }
+  const match = LEDGER_CALL.exec(line);
+  if (!match) return;
+  const call = { path: match[1], line: index + 1, bang: fence === "bang" };
+  skillCalls.push(call);
+  if (/^allowed-tools:/.test(line)) allowedToolsCall = call;
+});
+
+// Resolve a path as Claude Code would: substitute the skill's own directory, then
+// normalise the ../../ walk. Returns null if some other placeholder is left over,
+// so an edit that switches to a variable this check does not model fails loudly
+// instead of resolving a literal "${...}" path segment.
+function resolveSkillPath(raw) {
+  const substituted = raw.split("${CLAUDE_SKILL_DIR}").join(SKILL_DIR);
+  if (substituted.includes("${")) return null;
+  return resolve(substituted);
+}
+
+check("SKILL.md names the ledger CLI in every place it is expected to", () => {
+  assertEqual(
+    skillCalls.length,
+    SKILL_LEDGER_CALLS,
+    `found ${skillCalls.length} node "...ledger.mjs" invocation(s) in skills/ledger/SKILL.md, expected ${SKILL_LEDGER_CALLS} (lines: ${
+      skillCalls.map((c) => c.line).join(", ") || "none"
+    }) -- if the skill legitimately gained or lost one, update SKILL_LEDGER_CALLS in tests/run.mjs`,
+  );
+  // Without these two the checks below can pass vacuously.
+  assert(
+    allowedToolsCall !== null,
+    "no allowed-tools: line in skills/ledger/SKILL.md names the ledger CLI -- the skill would prompt for permission on every use",
+  );
+  assert(
+    skillCalls.some((c) => c.bang),
+    "no ```! fence in skills/ledger/SKILL.md runs the ledger CLI -- the skill would print a command instead of reading the ledger",
+  );
+});
+
+check("every ledger path in SKILL.md resolves to a file that exists", () => {
+  for (const call of skillCalls) {
+    const resolved = resolveSkillPath(call.path);
+    assert(
+      resolved !== null,
+      `SKILL.md line ${call.line}: ${call.path} still contains an unsubstituted placeholder after replacing \${CLAUDE_SKILL_DIR} -- tests/run.mjs does not model that variable`,
+    );
+    assert(
+      existsSync(resolved),
+      `SKILL.md line ${call.line}: ${call.path} resolves to ${resolved}, which does not exist -- the skill's ../../ walk no longer reaches its script`,
+    );
+  }
+});
+
+check("SKILL.md's allowed-tools rule and its ```! fence name the same file", () => {
+  const allowed = resolveSkillPath(allowedToolsCall.path);
+  for (const call of skillCalls.filter((c) => c.bang)) {
+    assertEqual(
+      resolveSkillPath(call.path),
+      allowed,
+      `SKILL.md line ${call.line} runs a different file than the allowed-tools rule on line ${allowedToolsCall.line} -- the rule will not match and the skill will prompt for permission`,
+    );
+  }
+});
+
+// Pins the skill to the CLI this suite actually exercises. If the CLI is genuinely
+// split or renamed, this is the check that says so.
+check("SKILL.md points at the ledger CLI the tests exercise", () => {
+  for (const call of skillCalls) {
+    assertEqual(
+      resolveSkillPath(call.path),
+      resolve(LEDGER),
+      `SKILL.md line ${call.line} names ${call.path}, which is not scripts/ledger.mjs -- if the CLI moved, update SKILL.md and the LEDGER constant in tests/run.mjs together`,
+    );
+  }
 });
 
 // --- summary ---------------------------------------------------------------
