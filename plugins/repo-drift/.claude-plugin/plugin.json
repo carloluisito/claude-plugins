@@ -1,0 +1,13 @@
+{
+  "name": "repo-drift",
+  "version": "0.1.0",
+  "description": "Tells Claude when the git repository moved — branch, HEAD, or an in-progress merge or rebase — since your previous turn in the session. Local only, no network.",
+  "author": {
+    "name": "carloluisito",
+    "url": "https://github.com/carloluisito"
+  },
+  "homepage": "https://github.com/carloluisito/claude-plugins/tree/main/plugins/repo-drift",
+  "repository": "https://github.com/carloluisito/claude-plugins",
+  "license": "MIT",
+  "keywords": ["hooks", "git", "context", "branch", "worktree"]
+}

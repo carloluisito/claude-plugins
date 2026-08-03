@@ -21,6 +21,23 @@
         "failures",
         "context"
       ]
+    },
+    {
+      "name": "repo-drift",
+      "source": "./plugins/repo-drift",
+      "version": "0.1.0",
+      "description": "Tells Claude when the git repository moved — branch, HEAD, or an in-progress merge or rebase — since your previous turn in the session. Local only, no network.",
+      "author": {
+        "name": "carloluisito",
+        "url": "https://github.com/carloluisito"
+      },
+      "keywords": [
+        "hooks",
+        "git",
+        "context",
+        "branch",
+        "worktree"
+      ]
     }
   ]
 }
