@@ -8,11 +8,14 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import * as lib from "../scripts/lib.mjs";
 import {
   MAX_ENTRIES,
+  MAX_SIGNATURE,
   MIN_COUNT,
   RENDER_BUDGET,
   SCHEMA,
+  clampSignature,
   decrementEntry,
   firstStage,
   ledgerPathFor,
@@ -25,6 +28,7 @@ import {
   signatureFor,
   sortFlags,
   tokenize,
+  truncationMarkerOf,
 } from "../scripts/lib.mjs";
 
 import { idFor } from "../scripts/ledger.mjs";
@@ -686,6 +690,122 @@ check("normalization never throws on adversarial input", () => {
     assert(typeof sig === "string" && sig.length > 0, `no signature for ${JSON.stringify(command)}`);
     assert(sig.length <= 200, `signature too long for ${JSON.stringify(command)}`);
   }
+});
+
+// --- long signatures (issue #20) -------------------------------------------
+//
+// `slice(0, MAX_SIGNATURE)` is a prefix match, so its collisions are not the
+// rare accidents a hash's would be: they are exactly two commands that share a
+// long prefix and differ in the tail, which is the ordinary shape of a
+// generated invocation. Two such commands each failing once landed on one row,
+// reached MIN_COUNT together, and got replayed as advice about a command nobody
+// ran. These tests pin the two properties that fix requires: over-cap
+// signatures stay distinct, and at-or-under-cap ones do not move at all.
+
+// Two strings sharing a prefix longer than the cap and differing only after it.
+const LONG_A = `${"a".repeat(MAX_SIGNATURE + 40)}TAIL-ONE`;
+const LONG_B = `${"a".repeat(MAX_SIGNATURE + 40)}TAIL-TWO`;
+
+check("clampSignature keeps two commands with a shared over-cap prefix apart", () => {
+  const a = clampSignature(LONG_A);
+  const b = clampSignature(LONG_B);
+  assert(a !== b, `both clamped to "${a}"`);
+  // And prove a bare slice would have merged them: the retained prefixes are
+  // byte-identical, so the digest is doing all of the work.
+  const marker = " ... [truncated ";
+  const cutA = a.slice(0, a.indexOf(marker));
+  const cutB = b.slice(0, b.indexOf(marker));
+  assert(cutA.length > 0 && cutA === cutB, "prefixes were expected to be identical");
+});
+
+check("clampSignature respects the cap", () => {
+  for (const s of [LONG_A, LONG_B, "x".repeat(50_000), `${"-".repeat(MAX_SIGNATURE)}z`]) {
+    const out = clampSignature(s);
+    assertEqual(out.length, MAX_SIGNATURE, `length for a ${s.length}-char input`);
+  }
+});
+
+check("clampSignature is deterministic", () => {
+  assertEqual(clampSignature(LONG_A), clampSignature(LONG_A), "same input twice");
+});
+
+// Byte-identity with 0.4.0. Every expected value below was produced by running
+// the 0.4.0 lib.mjs (git show <the 0.4.0 tree>:plugins/failure-memory/scripts/lib.mjs)
+// over the same inputs, so this table is a compatibility claim and not a
+// restatement of the current code. If clampSignature ever stops being the
+// identity function at or under the cap, existing ledgers stop matching new
+// observations, which means they stop self-clearing too -- so these are pinned
+// exactly rather than by length.
+const SIGNATURES_0_4_0 = [
+  ["Bash", { command: "npm test" }, "exit 1", "npm test"],
+  ["Bash", { command: "" }, "exit 1", "(empty command)"],
+  ["Bash", { command: "git commit -m 'wip'" }, "exit 1", "git commit -m 'wip'"],
+  [
+    "Bash",
+    { command: "docker build -t app:v2 --no-cache ." },
+    "exit 1",
+    "docker build -t app:v2 --no-cache .",
+  ],
+  ["Bash", { command: "cat foo.txt | grep -n bar" }, "exit 2", "cat foo.txt"],
+  [
+    "Bash",
+    { command: "pytest -q --maxfail=1 tests/unit" },
+    "exit 1",
+    "pytest -q --maxfail=<n> tests/unit",
+  ],
+  ["Edit", { file_path: "/repo/src/index.ts" }, "String not found", "*.ts error"],
+  ["Write", { file_path: "C:\\repo\\a.json" }, "EACCES: permission denied", "*.json permission"],
+  ["Task", { subagent_type: "Explore" }, "exit 1", "Explore error"],
+  ["Grep", { pattern: "x", path: "/repo" }, "no matches", "path,pattern no-match"],
+];
+
+for (const [tool, input, error, expected] of SIGNATURES_0_4_0) {
+  check(`signatureFor is unchanged from 0.4.0: ${tool} -> ${expected}`, () => {
+    assert(expected.length <= MAX_SIGNATURE, "this table is only about at-or-under-cap signatures");
+    assertEqual(signatureFor(tool, input, error), expected, `${tool} ${JSON.stringify(input)}`);
+  });
+}
+
+check("clampSignature does not touch a signature at exactly the cap", () => {
+  const exact = "y".repeat(MAX_SIGNATURE);
+  assertEqual(clampSignature(exact), exact, "at the cap");
+  assertEqual(truncationMarkerOf(exact), "", "no marker");
+});
+
+check("signatureFor keeps two long real commands apart", () => {
+  // Built out of flags, not paths: dropOperands strips bare operands and
+  // normalizeText collapses paths to <path>, so only a long flag survives
+  // normalization long enough to reach the cap.
+  const long = (tail) =>
+    `esbuild --bundle --minify --target=esnext --define:FEATURE_${"A".repeat(MAX_SIGNATURE)}=${tail}`;
+  const a = signatureFor("Bash", { command: long("aaa") }, "exit 1");
+  const b = signatureFor("Bash", { command: long("bbb") }, "exit 1");
+  assert(a !== b, `both collapsed to "${a}"`);
+  assertEqual(a.length, MAX_SIGNATURE, "a is capped");
+  assertEqual(b.length, MAX_SIGNATURE, "b is capped");
+  assert(truncationMarkerOf(a) !== "", `no marker on "${a}"`);
+});
+
+check("a truncated signature is visible in the injected context", () => {
+  const sig = clampSignature(LONG_A);
+  const text = renderContext(
+    [{ tool: "Bash", signature: sig, count: 2, last_seen: iso(1), excerpt: "" }],
+    { now: new Date() }
+  );
+  assert(text.includes("[truncated "), `marker missing from context: ${text}`);
+});
+
+check("truncationMarkerOf only matches the marker clampSignature writes", () => {
+  const sig = clampSignature(LONG_A);
+  const marker = truncationMarkerOf(sig);
+  assert(sig.endsWith(marker), "marker is a suffix");
+  assertEqual(truncationMarkerOf("npm test"), "", "untruncated");
+  assertEqual(truncationMarkerOf(""), "", "empty");
+  assertEqual(truncationMarkerOf(null), "", "null");
+  // A user command that merely looks like the marker must not be mistaken for
+  // one: the digest width is fixed and anchored at the end.
+  assertEqual(truncationMarkerOf("echo ... [truncated abc]"), "", "short hex");
+  assertEqual(truncationMarkerOf("echo ... [truncated a1b2c3d4e5f6] | wc"), "", "not at the end");
 });
 
 check("tokenize keeps quoted runs in one token", () => {
