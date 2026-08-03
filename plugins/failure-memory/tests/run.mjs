@@ -1898,6 +1898,61 @@ check("an unknown command explains itself instead of failing the turn", () => {
   assert(/list|forget/.test(r.stdout), "names what it does accept");
 });
 
+// --- documented constants (issue #20) --------------------------------------
+
+// The README states hard numbers -- caps, thresholds, lifetimes -- and prose does
+// not fail a build when the code moves underneath it. Issue #20 was exactly that
+// shape: the signature cap was documented and the behaviour at the cap was not.
+// These two checks pin the numbers, and only the numbers.
+//
+// The boundary is deliberate and should not be widened: this pins EXPORTED NUMERIC
+// CONSTANTS ONLY. It is not a documentation linter, it does not read the prose
+// around a number, and it cannot tell whether a sentence is still true. Growing it
+// into a prose checker would make it unfalsifiable and it would be deleted.
+
+const README = readFileSync(join(PLUGIN, "README.md"), "utf8");
+
+// constant name -> the literal string that must appear in README.md. The value is
+// what a reader is expected to find, not just the bare digits: "200" alone would be
+// satisfied by an unrelated number elsewhere in the file.
+const DOCUMENTED_CONSTANTS = {
+  SCHEMA: '"schema": 2',
+  MAX_ENTRIES: "200 (lowest `count` evicted first, then oldest)",
+  MAX_EXCERPT: "300 characters",
+  MAX_SIGNATURE: "200 characters",
+  RENDER_BUDGET: "2,000 characters",
+  MIN_COUNT: "`count >= 2`",
+  RECENT_DAYS: "seen within 30 days",
+  EXPIRE_DAYS: "90 days since `last_seen`",
+};
+
+check("every documented constant appears in the README as documented", () => {
+  for (const [name, expected] of Object.entries(DOCUMENTED_CONSTANTS)) {
+    assert(
+      README.includes(expected),
+      `${name} is ${lib[name]} but README.md does not contain ${JSON.stringify(
+        expected,
+      )} -- update README.md, or update DOCUMENTED_CONSTANTS in tests/run.mjs if the wording moved`,
+    );
+  }
+});
+
+// The leverage is this direction, not the one above: adding a numeric constant to
+// lib.mjs fails the suite until it is documented and mapped.
+check("every exported numeric constant is documented", () => {
+  const numeric = Object.keys(lib)
+    .filter((key) => typeof lib[key] === "number")
+    .sort();
+  const missing = numeric.filter((key) => !(key in DOCUMENTED_CONSTANTS));
+  assertEqual(
+    missing.length,
+    0,
+    `undocumented exported constant(s): ${missing
+      .map((key) => `${key}=${lib[key]}`)
+      .join(", ")} -- document each in README.md and add it to DOCUMENTED_CONSTANTS in tests/run.mjs`,
+  );
+});
+
 // --- summary ---------------------------------------------------------------
 
 cleanupTempDirs();
