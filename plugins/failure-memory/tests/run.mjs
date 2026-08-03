@@ -808,6 +808,88 @@ check("truncationMarkerOf only matches the marker clampSignature writes", () => 
   assertEqual(truncationMarkerOf("echo ... [truncated a1b2c3d4e5f6] | wc"), "", "not at the end");
 });
 
+// Migration. The schema is deliberately NOT bumped: every signature at or under
+// the cap is byte-identical to 0.4.0, so a ledger written by 0.4.0 keeps working
+// unchanged. A bump would have discarded every correct entry in every existing
+// ledger in order to fix the rare wrong one, which is the worse trade.
+check("SCHEMA is unchanged, so 0.4.0 ledgers are not discarded", () => {
+  assertEqual(SCHEMA, 2, "schema version");
+});
+
+check("a 0.4.0 ledger still matches and still self-clears", () => {
+  const d = freshDataDir();
+  // Exactly what 0.4.0 would have written for two `npm test` failures.
+  seedLedger(d, [
+    {
+      tool: "Bash",
+      signature: "npm test",
+      error_excerpt: "exit 1",
+      count: 2,
+      first_seen: iso(3),
+      last_seen: iso(1),
+    },
+  ]);
+
+  // A third failure lands on the same row rather than opening a second one --
+  // which is only true if signatureFor still produces the identical string.
+  capture(d, bashFailure("npm test"));
+  let entries = ledgerOf(d).entries;
+  assertEqual(entries.length, 1, "no second row for the same command");
+  assertEqual(entries[0].count, 3, "existing row incremented");
+
+  // And it still walks back to nothing on success, so a pre-existing ledger is
+  // not left with rows it can never clear.
+  resolveHook(d, bashSuccess("npm test"));
+  resolveHook(d, bashSuccess("npm test"));
+  resolveHook(d, bashSuccess("npm test"));
+  assertEqual(ledgerOf(d).entries.length, 0, "cleared");
+});
+
+check("a pre-fix over-long entry ages out rather than being rewritten", () => {
+  const d = freshDataDir();
+  // A command whose *normalized* form is over the cap. It has to be built out of
+  // flags: a long bare token is dropped as an operand, and a long alphanumeric
+  // run is collapsed to <redacted-blob> before the cap is ever reached.
+  const command = `esbuild --bundle --define:FEATURE_${"A".repeat(MAX_SIGNATURE)}=aaa`;
+  const current = signatureFor("Bash", { command }, "exit 1");
+  // What 0.4.0 wrote for it: a bare 200-char slice of the same normalized string.
+  // The new form is that string's first 171 characters plus a 29-character
+  // marker, and the flag's `A` run is long enough to cover characters 171-200 of
+  // the normalized form, so swapping the marker back for `A`s reconstructs the
+  // 0.4.0 bytes exactly. The assertions below pin what actually matters about it:
+  // full width, and no marker.
+  const oldStyle = `${current.slice(0, MAX_SIGNATURE - 29)}${"A".repeat(29)}`;
+  assertEqual(oldStyle.length, MAX_SIGNATURE, "the old form filled the cap");
+  assertEqual(truncationMarkerOf(oldStyle), "", "the old form carries no marker");
+  assert(oldStyle !== current, "the two forms differ");
+  seedLedger(d, [
+    {
+      tool: "Bash",
+      signature: oldStyle,
+      error_excerpt: "exit 1",
+      count: 2,
+      first_seen: iso(3),
+      last_seen: iso(1),
+    },
+  ]);
+
+  // Nothing rewrites it: the same command failing again gets a new row under the
+  // new key, and the old row is left to expire (90 days) or be evicted (200
+  // entries). Rewriting would mean guessing which command an ambiguous prefix
+  // came from, which is the merge this change exists to stop.
+  capture(d, bashFailure(command));
+  const entries = ledgerOf(d).entries;
+  assertEqual(entries.length, 2, "old row untouched, new row added");
+  assert(
+    entries.some((e) => e.signature === oldStyle),
+    "the 0.4.0 row is still there verbatim",
+  );
+  assert(
+    entries.some((e) => truncationMarkerOf(e.signature) !== ""),
+    "the new row carries a marker",
+  );
+});
+
 check("tokenize keeps quoted runs in one token", () => {
   assertEqual(tokenize('echo "a b"').length, 2, 'echo "a b"');
   assertEqual(tokenize("echo 'a b' c").join("|"), "echo|'a b'|c", "single quotes");
