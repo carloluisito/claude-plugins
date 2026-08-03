@@ -52,6 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changes Claude itself makes are reported as drift too. The hook sees the
   repository, not the reason, and inferring intent from tool history risks
   silently swallowing a real change.
+- **Forcing the state write to fail, for the test that covers it, is
+  platform-specific.** `rename(2)` never consults the target file's mode, only
+  write+execute on the containing directory, so `chmod 0o444` on the state file
+  blocks the write on Windows and does nothing on Linux. The test applies a
+  read-only file *and* a read-only directory — Windows ignores directory modes,
+  POSIX honours them, and each platform uses the one that bites. Both were
+  verified load-bearing by removing each in turn and reproducing the failure.
 - Anything that goes wrong exits `0` with empty stdout: no `git`, not a
   repository, no commits yet, malformed input, unwritable state. No network
   calls and no new dependencies.

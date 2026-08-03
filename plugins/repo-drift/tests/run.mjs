@@ -772,8 +772,23 @@ check("the note is emitted even when the fingerprint cannot be persisted", () =>
   run(dataDir, { cwd: dir, session_id: "s1" });
 
   const path = statePathFor(resolveDataDir(dataDir), dir);
-  chmodSync(path, 0o444); // read ok, rename over it fails
 
+  // Making the write fail is platform-specific, and assuming otherwise is how
+  // this passed on Windows and failed on Linux CI. The write is
+  // `writeFileSync(tmp)` then `renameSync(tmp, path)`; `rename(2)` never
+  // consults the target file's mode, only write+execute on the containing
+  // directory. So a read-only *file* blocks it on Windows only, and a read-only
+  // *directory* blocks it (at temp creation) on POSIX only, because Windows
+  // ignores directory modes. Apply both and let each platform use the one that
+  // bites. Both leave reads working, which the test needs: 0o555 keeps r and x
+  // on the directory, 0o444 keeps r on the file.
+  const stateDir = dirname(path);
+  chmodSync(path, 0o444);
+  chmodSync(stateDir, 0o555);
+
+  // If a future platform (or running as root) blocks neither, the write
+  // succeeds and the baseline assertion below fails loudly. That is the
+  // intended failure mode — this must never pass vacuously.
   try {
     git(dir, "checkout", "-q", "-b", "feat/auth");
     const text = injection(run(dataDir, { cwd: dir, session_id: "s1" }), "unwritable state");
@@ -790,6 +805,9 @@ check("the note is emitted even when the fingerprint cannot be persisted", () =>
     const again = injection(run(dataDir, { cwd: dir, session_id: "s1" }), "repeat after failure");
     assert(again.includes("feat/auth"), "an undelivered note must not be swallowed");
   } finally {
+    // Directory first: the file chmod needs the directory traversable, and the
+    // suite's own cleanup needs it writable again.
+    chmodSync(stateDir, 0o755);
     chmodSync(path, 0o666);
   }
 });
