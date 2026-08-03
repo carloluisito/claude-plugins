@@ -227,6 +227,29 @@ if (existsSync(PLUGINS_DIR)) {
   }
 }
 
+// ------------------------------------------------- front-door discoverability
+
+// marketplace.json is the source of truth for what ships, but README.md is what
+// a stranger actually reads before deciding to install anything. A plugin the
+// front page never mentions is effectively undiscoverable no matter how well it
+// is catalogued. Nothing else ties these two files together, and the drift is
+// silent — every other check passes while the README claims the shelf is empty.
+const README = join(ROOT, "README.md");
+if (!existsSync(README)) {
+  err("README.md is missing — it is the front page users read before installing anything");
+} else {
+  const readme = readFileSync(README, "utf8");
+  for (const name of seen.keys()) {
+    if (!readme.includes(name)) {
+      err(
+        `README.md never mentions "${name}", but marketplace.json ships it — ` +
+          `readers of the front page cannot discover it. List it under ` +
+          `"Available plugins" with a one-line description.`,
+      );
+    }
+  }
+}
+
 // ------------------------------------------------------------------- reporting
 
 function report() {

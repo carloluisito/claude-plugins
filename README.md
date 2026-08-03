@@ -21,8 +21,12 @@ Refresh your local copy after new plugins land:
 
 ## Available plugins
 
-None yet — this marketplace is newly opened. Each plugin will be listed here
-with a one-line description and a link to its own README.
+| Plugin | What it does |
+|---|---|
+| [failure-memory](./plugins/failure-memory/README.md) | Remembers tool calls that keep failing in a project and reminds you at the start of the next session. Local only, no network. |
+
+`scripts/validate-repo.mjs` fails if a plugin in the catalog is missing from this
+table, so it cannot silently fall behind what actually ships.
 
 ## Repository layout
 
