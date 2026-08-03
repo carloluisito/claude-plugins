@@ -24,6 +24,7 @@ Refresh your local copy after new plugins land:
 | Plugin | What it does |
 |---|---|
 | [failure-memory](./plugins/failure-memory/README.md) | Remembers tool calls that keep failing in a project and reminds you at the start of the next session. Local only, no network. |
+| [repo-drift](./plugins/repo-drift/README.md) | Tells Claude when the git repository moved — branch, `HEAD`, or an in-progress merge or rebase — since your previous turn in the session. Local only, no network. |
 
 `scripts/validate-repo.mjs` fails if a plugin in the catalog is missing from this
 table, so it cannot silently fall behind what actually ships.
