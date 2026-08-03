@@ -64,6 +64,34 @@ untidy; a wrongly merged one produces a reminder about a command you never ran.
 So anything ambiguous — an unterminated quote, a flag that might take a value —
 is left uncollapsed.
 
+### Signatures past the cap
+
+A signature is capped at 200 characters, and the cap is where that bias needs
+help. Cutting a long signature down to its first 200 characters is a *prefix*
+match, so what collides is not random: it is two commands sharing a long prefix
+and differing in the tail — a generated invocation, a long flag list — which is
+the shape that reaches the cap in the first place. Step 3 above makes it worse by
+sorting a trailing flag run, so the cut can land partway through a sorted list of
+flags. Two unrelated failures then share one row, reach the threshold of two
+between them, and get replayed as advice about a command nobody ran.
+
+So a signature over the cap keeps its first 171 characters and gains a marker
+built from a SHA-256 digest of the **whole** normalized string:
+
+```
+esbuild --bundle --define:FEATURE_AAAA...AAAA ... [truncated 4a55c491caa6]
+```
+
+The digest covers the part that was cut, so two commands sharing an over-cap
+prefix stay apart. 171 + 29 = 200, so the cap itself does not move, and a
+signature at or under it is untouched — byte-for-byte what earlier versions
+wrote, so an existing ledger keeps matching and keeps self-clearing.
+
+Entries recorded **before** this existed keep the merged key they were written
+with. They are not rewritten: working out which command an ambiguous 200-character
+prefix came from would mean guessing, which is the merge this is here to prevent.
+They age out after 90 days, or are evicted once the project passes 200 entries.
+
 Other tools are keyed more coarsely, by tool name plus a rough class of error:
 `Edit`, `Write`, and `NotebookEdit` by file extension, `Task` by subagent type,
 MCP tools by the shape of their input.
@@ -229,6 +257,7 @@ credential store, and it should never be treated as one.**
 | Entries per project | 200 (lowest `count` evicted first, then oldest) |
 | Entry lifetime | 90 days since `last_seen` |
 | Error excerpt | 300 characters |
+| Signature | 200 characters (a longer one keeps a 171-character prefix plus a digest marker — see [Signatures past the cap](#signatures-past-the-cap)) |
 | Injected context | 2,000 characters (hook output cap is 10,000) |
 | Replay threshold | `count >= 2` and seen within 30 days |
 

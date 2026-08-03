@@ -8,11 +8,14 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import * as lib from "../scripts/lib.mjs";
 import {
   MAX_ENTRIES,
+  MAX_SIGNATURE,
   MIN_COUNT,
   RENDER_BUDGET,
   SCHEMA,
+  clampSignature,
   decrementEntry,
   firstStage,
   ledgerPathFor,
@@ -25,6 +28,7 @@ import {
   signatureFor,
   sortFlags,
   tokenize,
+  truncationMarkerOf,
 } from "../scripts/lib.mjs";
 
 import { idFor } from "../scripts/ledger.mjs";
@@ -686,6 +690,204 @@ check("normalization never throws on adversarial input", () => {
     assert(typeof sig === "string" && sig.length > 0, `no signature for ${JSON.stringify(command)}`);
     assert(sig.length <= 200, `signature too long for ${JSON.stringify(command)}`);
   }
+});
+
+// --- long signatures (issue #20) -------------------------------------------
+//
+// `slice(0, MAX_SIGNATURE)` is a prefix match, so its collisions are not the
+// rare accidents a hash's would be: they are exactly two commands that share a
+// long prefix and differ in the tail, which is the ordinary shape of a
+// generated invocation. Two such commands each failing once landed on one row,
+// reached MIN_COUNT together, and got replayed as advice about a command nobody
+// ran. These tests pin the two properties that fix requires: over-cap
+// signatures stay distinct, and at-or-under-cap ones do not move at all.
+
+// Two strings sharing a prefix longer than the cap and differing only after it.
+const LONG_A = `${"a".repeat(MAX_SIGNATURE + 40)}TAIL-ONE`;
+const LONG_B = `${"a".repeat(MAX_SIGNATURE + 40)}TAIL-TWO`;
+
+check("clampSignature keeps two commands with a shared over-cap prefix apart", () => {
+  const a = clampSignature(LONG_A);
+  const b = clampSignature(LONG_B);
+  assert(a !== b, `both clamped to "${a}"`);
+  // And prove a bare slice would have merged them: the retained prefixes are
+  // byte-identical, so the digest is doing all of the work.
+  const marker = " ... [truncated ";
+  const cutA = a.slice(0, a.indexOf(marker));
+  const cutB = b.slice(0, b.indexOf(marker));
+  assert(cutA.length > 0 && cutA === cutB, "prefixes were expected to be identical");
+});
+
+check("clampSignature respects the cap", () => {
+  for (const s of [LONG_A, LONG_B, "x".repeat(50_000), `${"-".repeat(MAX_SIGNATURE)}z`]) {
+    const out = clampSignature(s);
+    assertEqual(out.length, MAX_SIGNATURE, `length for a ${s.length}-char input`);
+  }
+});
+
+check("clampSignature is deterministic", () => {
+  assertEqual(clampSignature(LONG_A), clampSignature(LONG_A), "same input twice");
+});
+
+// Byte-identity with 0.4.0. Every expected value below was produced by running
+// the 0.4.0 lib.mjs (git show <the 0.4.0 tree>:plugins/failure-memory/scripts/lib.mjs)
+// over the same inputs, so this table is a compatibility claim and not a
+// restatement of the current code. If clampSignature ever stops being the
+// identity function at or under the cap, existing ledgers stop matching new
+// observations, which means they stop self-clearing too -- so these are pinned
+// exactly rather than by length.
+const SIGNATURES_0_4_0 = [
+  ["Bash", { command: "npm test" }, "exit 1", "npm test"],
+  ["Bash", { command: "" }, "exit 1", "(empty command)"],
+  ["Bash", { command: "git commit -m 'wip'" }, "exit 1", "git commit -m 'wip'"],
+  [
+    "Bash",
+    { command: "docker build -t app:v2 --no-cache ." },
+    "exit 1",
+    "docker build -t app:v2 --no-cache .",
+  ],
+  ["Bash", { command: "cat foo.txt | grep -n bar" }, "exit 2", "cat foo.txt"],
+  [
+    "Bash",
+    { command: "pytest -q --maxfail=1 tests/unit" },
+    "exit 1",
+    "pytest -q --maxfail=<n> tests/unit",
+  ],
+  ["Edit", { file_path: "/repo/src/index.ts" }, "String not found", "*.ts error"],
+  ["Write", { file_path: "C:\\repo\\a.json" }, "EACCES: permission denied", "*.json permission"],
+  ["Task", { subagent_type: "Explore" }, "exit 1", "Explore error"],
+  ["Grep", { pattern: "x", path: "/repo" }, "no matches", "path,pattern no-match"],
+];
+
+for (const [tool, input, error, expected] of SIGNATURES_0_4_0) {
+  check(`signatureFor is unchanged from 0.4.0: ${tool} -> ${expected}`, () => {
+    assert(expected.length <= MAX_SIGNATURE, "this table is only about at-or-under-cap signatures");
+    assertEqual(signatureFor(tool, input, error), expected, `${tool} ${JSON.stringify(input)}`);
+  });
+}
+
+check("clampSignature does not touch a signature at exactly the cap", () => {
+  const exact = "y".repeat(MAX_SIGNATURE);
+  assertEqual(clampSignature(exact), exact, "at the cap");
+  assertEqual(truncationMarkerOf(exact), "", "no marker");
+});
+
+check("signatureFor keeps two long real commands apart", () => {
+  // Built out of flags, not paths: dropOperands strips bare operands and
+  // normalizeText collapses paths to <path>, so only a long flag survives
+  // normalization long enough to reach the cap.
+  const long = (tail) =>
+    `esbuild --bundle --minify --target=esnext --define:FEATURE_${"A".repeat(MAX_SIGNATURE)}=${tail}`;
+  const a = signatureFor("Bash", { command: long("aaa") }, "exit 1");
+  const b = signatureFor("Bash", { command: long("bbb") }, "exit 1");
+  assert(a !== b, `both collapsed to "${a}"`);
+  assertEqual(a.length, MAX_SIGNATURE, "a is capped");
+  assertEqual(b.length, MAX_SIGNATURE, "b is capped");
+  assert(truncationMarkerOf(a) !== "", `no marker on "${a}"`);
+});
+
+check("a truncated signature is visible in the injected context", () => {
+  const sig = clampSignature(LONG_A);
+  const text = renderContext(
+    [{ tool: "Bash", signature: sig, count: 2, last_seen: iso(1), excerpt: "" }],
+    { now: new Date() }
+  );
+  assert(text.includes("[truncated "), `marker missing from context: ${text}`);
+});
+
+check("truncationMarkerOf only matches the marker clampSignature writes", () => {
+  const sig = clampSignature(LONG_A);
+  const marker = truncationMarkerOf(sig);
+  assert(sig.endsWith(marker), "marker is a suffix");
+  assertEqual(truncationMarkerOf("npm test"), "", "untruncated");
+  assertEqual(truncationMarkerOf(""), "", "empty");
+  assertEqual(truncationMarkerOf(null), "", "null");
+  // A user command that merely looks like the marker must not be mistaken for
+  // one: the digest width is fixed and anchored at the end.
+  assertEqual(truncationMarkerOf("echo ... [truncated abc]"), "", "short hex");
+  assertEqual(truncationMarkerOf("echo ... [truncated a1b2c3d4e5f6] | wc"), "", "not at the end");
+});
+
+// Migration. The schema is deliberately NOT bumped: every signature at or under
+// the cap is byte-identical to 0.4.0, so a ledger written by 0.4.0 keeps working
+// unchanged. A bump would have discarded every correct entry in every existing
+// ledger in order to fix the rare wrong one, which is the worse trade.
+check("SCHEMA is unchanged, so 0.4.0 ledgers are not discarded", () => {
+  assertEqual(SCHEMA, 2, "schema version");
+});
+
+check("a 0.4.0 ledger still matches and still self-clears", () => {
+  const d = freshDataDir();
+  // Exactly what 0.4.0 would have written for two `npm test` failures.
+  seedLedger(d, [
+    {
+      tool: "Bash",
+      signature: "npm test",
+      error_excerpt: "exit 1",
+      count: 2,
+      first_seen: iso(3),
+      last_seen: iso(1),
+    },
+  ]);
+
+  // A third failure lands on the same row rather than opening a second one --
+  // which is only true if signatureFor still produces the identical string.
+  capture(d, bashFailure("npm test"));
+  let entries = ledgerOf(d).entries;
+  assertEqual(entries.length, 1, "no second row for the same command");
+  assertEqual(entries[0].count, 3, "existing row incremented");
+
+  // And it still walks back to nothing on success, so a pre-existing ledger is
+  // not left with rows it can never clear.
+  resolveHook(d, bashSuccess("npm test"));
+  resolveHook(d, bashSuccess("npm test"));
+  resolveHook(d, bashSuccess("npm test"));
+  assertEqual(ledgerOf(d).entries.length, 0, "cleared");
+});
+
+check("a pre-fix over-long entry ages out rather than being rewritten", () => {
+  const d = freshDataDir();
+  // A command whose *normalized* form is over the cap. It has to be built out of
+  // flags: a long bare token is dropped as an operand, and a long alphanumeric
+  // run is collapsed to <redacted-blob> before the cap is ever reached.
+  const command = `esbuild --bundle --define:FEATURE_${"A".repeat(MAX_SIGNATURE)}=aaa`;
+  const current = signatureFor("Bash", { command }, "exit 1");
+  // What 0.4.0 wrote for it: a bare 200-char slice of the same normalized string.
+  // The new form is that string's first 171 characters plus a 29-character
+  // marker, and the flag's `A` run is long enough to cover characters 171-200 of
+  // the normalized form, so swapping the marker back for `A`s reconstructs the
+  // 0.4.0 bytes exactly. The assertions below pin what actually matters about it:
+  // full width, and no marker.
+  const oldStyle = `${current.slice(0, MAX_SIGNATURE - 29)}${"A".repeat(29)}`;
+  assertEqual(oldStyle.length, MAX_SIGNATURE, "the old form filled the cap");
+  assertEqual(truncationMarkerOf(oldStyle), "", "the old form carries no marker");
+  assert(oldStyle !== current, "the two forms differ");
+  seedLedger(d, [
+    {
+      tool: "Bash",
+      signature: oldStyle,
+      error_excerpt: "exit 1",
+      count: 2,
+      first_seen: iso(3),
+      last_seen: iso(1),
+    },
+  ]);
+
+  // Nothing rewrites it: the same command failing again gets a new row under the
+  // new key, and the old row is left to expire (90 days) or be evicted (200
+  // entries). Rewriting would mean guessing which command an ambiguous prefix
+  // came from, which is the merge this change exists to stop.
+  capture(d, bashFailure(command));
+  const entries = ledgerOf(d).entries;
+  assertEqual(entries.length, 2, "old row untouched, new row added");
+  assert(
+    entries.some((e) => e.signature === oldStyle),
+    "the 0.4.0 row is still there verbatim",
+  );
+  assert(
+    entries.some((e) => truncationMarkerOf(e.signature) !== ""),
+    "the new row carries a marker",
+  );
 });
 
 check("tokenize keeps quoted runs in one token", () => {
@@ -1386,6 +1588,58 @@ check("a full ledger stays inside the output budget and says what it omitted", (
   assert(r.stdout.includes(ledgerPathFor(d, p.cwd)), "points at the file for the rest");
 });
 
+// The listing clips a signature to its own column, which is narrower than
+// MAX_SIGNATURE. A blind clip would cut the truncation marker off, and the two
+// rows below would then print identical visible text under different ids --
+// which reads as a bug in the ids rather than as two different commands. This is
+// the surface issue #20 asks about: the user's route to "did these merge?" is
+// this command, so the answer has to be legible here and not only in the file.
+check("two truncated signatures stay distinguishable in the listing", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = [
+    { tool: "Bash", signature: clampSignature(LONG_A), error_excerpt: "boom", count: 3, first_seen: iso(5), last_seen: iso(1) },
+    { tool: "Bash", signature: clampSignature(LONG_B), error_excerpt: "boom", count: 3, first_seen: iso(5), last_seen: iso(1) },
+  ];
+  assert(entries[0].signature !== entries[1].signature, "fixture signatures differ");
+  seedLedger(d, entries, p.cwd);
+
+  const r = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+
+  const ids = rowIds(r.stdout, { starred: true });
+  assertEqual(ids.length, 2, `two rows, not one merged row: ${r.stdout}`);
+  assertEqual(new Set(ids).size, 2, "two distinct ids");
+
+  // The rows' visible text must differ too, not just their ids.
+  const rows = r.stdout.split("\n").filter((line) => ROW.test(line));
+  assertEqual(rows.length, 2, "two rows matched");
+  assert(rows[0] !== rows[1], `rows are identical text under different ids: ${rows[0]}`);
+  for (const row of rows) {
+    assert(/\[truncated [0-9a-f]{12}\]/.test(row), `marker survived the column clip: ${row}`);
+  }
+});
+
+check("forget prints the marker that tells two truncated entries apart", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = [
+    { tool: "Bash", signature: clampSignature(LONG_A), error_excerpt: "boom", count: 3, first_seen: iso(5), last_seen: iso(1) },
+    { tool: "Bash", signature: clampSignature(LONG_B), error_excerpt: "boom", count: 3, first_seen: iso(5), last_seen: iso(1) },
+  ];
+  const path = seedLedger(d, entries, p.cwd);
+
+  const r = ledgerCli(["forget", idFor(entries[0])], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(
+    r.stdout.includes(truncationMarkerOf(entries[0].signature)),
+    `names which one it forgot: ${r.stdout}`,
+  );
+
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  assertEqual(JSON.stringify(after.entries), JSON.stringify([entries[1]]), "only one removed");
+});
+
 check("forget removes only the named entry and leaves the others untouched", () => {
   const d = freshDataDir();
   const p = fixtureProject();
@@ -1642,6 +1896,61 @@ check("an unknown command explains itself instead of failing the turn", () => {
   assertEqual(r.status, 0, "exit code");
   assert(/Unknown command/.test(r.stdout), `names the problem: ${r.stdout}`);
   assert(/list|forget/.test(r.stdout), "names what it does accept");
+});
+
+// --- documented constants (issue #20) --------------------------------------
+
+// The README states hard numbers -- caps, thresholds, lifetimes -- and prose does
+// not fail a build when the code moves underneath it. Issue #20 was exactly that
+// shape: the signature cap was documented and the behaviour at the cap was not.
+// These two checks pin the numbers, and only the numbers.
+//
+// The boundary is deliberate and should not be widened: this pins EXPORTED NUMERIC
+// CONSTANTS ONLY. It is not a documentation linter, it does not read the prose
+// around a number, and it cannot tell whether a sentence is still true. Growing it
+// into a prose checker would make it unfalsifiable and it would be deleted.
+
+const README = readFileSync(join(PLUGIN, "README.md"), "utf8");
+
+// constant name -> the literal string that must appear in README.md. The value is
+// what a reader is expected to find, not just the bare digits: "200" alone would be
+// satisfied by an unrelated number elsewhere in the file.
+const DOCUMENTED_CONSTANTS = {
+  SCHEMA: '"schema": 2',
+  MAX_ENTRIES: "200 (lowest `count` evicted first, then oldest)",
+  MAX_EXCERPT: "300 characters",
+  MAX_SIGNATURE: "200 characters",
+  RENDER_BUDGET: "2,000 characters",
+  MIN_COUNT: "`count >= 2`",
+  RECENT_DAYS: "seen within 30 days",
+  EXPIRE_DAYS: "90 days since `last_seen`",
+};
+
+check("every documented constant appears in the README as documented", () => {
+  for (const [name, expected] of Object.entries(DOCUMENTED_CONSTANTS)) {
+    assert(
+      README.includes(expected),
+      `${name} is ${lib[name]} but README.md does not contain ${JSON.stringify(
+        expected,
+      )} -- update README.md, or update DOCUMENTED_CONSTANTS in tests/run.mjs if the wording moved`,
+    );
+  }
+});
+
+// The leverage is this direction, not the one above: adding a numeric constant to
+// lib.mjs fails the suite until it is documented and mapped.
+check("every exported numeric constant is documented", () => {
+  const numeric = Object.keys(lib)
+    .filter((key) => typeof lib[key] === "number")
+    .sort();
+  const missing = numeric.filter((key) => !(key in DOCUMENTED_CONSTANTS));
+  assertEqual(
+    missing.length,
+    0,
+    `undocumented exported constant(s): ${missing
+      .map((key) => `${key}=${lib[key]}`)
+      .join(", ")} -- document each in README.md and add it to DOCUMENTED_CONSTANTS in tests/run.mjs`,
+  );
 });
 
 // --- summary ---------------------------------------------------------------

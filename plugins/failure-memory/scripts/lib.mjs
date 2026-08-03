@@ -274,6 +274,68 @@ function extensionOf(path) {
   return dot > 0 ? base.slice(dot) : "";
 }
 
+// The marker appended when a signature is cut. It does two jobs, both
+// load-bearing.
+//
+// It keeps distinct commands distinct: the digest is over the *whole* normalized
+// signature, so two invocations sharing a 250-character prefix and differing only
+// in their tail get different keys. A bare `slice(0, MAX_SIGNATURE)` merged them,
+// which is precisely the wrong merge this plugin says it avoids -- and worse, two
+// commands that each failed once then reached `count >= 2` on one row and got
+// replayed as advice about a command nobody ran.
+//
+// And it makes the cut visible. `renderContext` prints the signature verbatim, so
+// carrying the marker inside the signature means that surface shows it without
+// having to know truncation exists. The ledger listing clips to its own narrower
+// column and so does have to know -- see `truncationMarkerOf`.
+//
+// 12 hex is 48 bits. A ledger holds at most MAX_ENTRIES rows, so the chance of a
+// collision among them is negligible; the width is not tuned finer than that.
+const TRUNCATION_DIGEST_HEX = 12;
+const truncationMarker = (digest) => ` ... [truncated ${digest}]`;
+// Derived, not written down, so the prefix budget cannot drift out of step with
+// the format above.
+const TRUNCATION_MARKER_LENGTH = truncationMarker("0".repeat(TRUNCATION_DIGEST_HEX)).length;
+
+/**
+ * Cut a signature to MAX_SIGNATURE without merging two different commands.
+ *
+ * At or below the cap this is the identity function, and that is the
+ * compatibility guarantee: every signature a 0.4.0 ledger holds that was not
+ * already cut is byte-identical here, so existing entries keep matching and keep
+ * self-clearing. Only over-long signatures change shape, and those were already
+ * unreliable. Deterministic -- no clock, no randomness, no per-install salt.
+ */
+export function clampSignature(sig) {
+  const s = String(sig ?? "");
+  if (s.length <= MAX_SIGNATURE) return s;
+
+  const digest = createHash("sha256")
+    .update(s, "utf8")
+    .digest("hex")
+    .slice(0, TRUNCATION_DIGEST_HEX);
+  return `${s.slice(0, MAX_SIGNATURE - TRUNCATION_MARKER_LENGTH)}${truncationMarker(digest)}`;
+}
+
+// Derived from the same two constants the marker is built from, so the pattern
+// cannot drift away from what `clampSignature` writes.
+const TRUNCATION_MARKER_PATTERN = new RegExp(
+  ` \\.\\.\\. \\[truncated [0-9a-f]{${TRUNCATION_DIGEST_HEX}}\\]$`
+);
+
+/**
+ * The truncation marker at the end of a signature, or "" if there is none.
+ *
+ * For display surfaces that clip a signature to a column narrower than
+ * MAX_SIGNATURE: clipping blind would cut the marker off, and two rows whose
+ * visible text is then identical but whose ids differ is a worse outcome than a
+ * shorter prefix. Callers keep the marker and spend the width on it.
+ */
+export function truncationMarkerOf(sig) {
+  const match = TRUNCATION_MARKER_PATTERN.exec(String(sig ?? ""));
+  return match ? match[0] : "";
+}
+
 /**
  * Build the ledger key for a failure. Returns a trimmed, redacted string.
  */
@@ -294,7 +356,7 @@ export function signatureFor(toolName, toolInput, error) {
     sig = `${keys || "(no input)"} ${errorClass(error)}`;
   }
 
-  return sig.slice(0, MAX_SIGNATURE);
+  return clampSignature(sig);
 }
 
 /** Redact and clamp an error string for storage. */

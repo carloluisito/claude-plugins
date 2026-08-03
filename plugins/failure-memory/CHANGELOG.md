@@ -5,6 +5,50 @@ All notable changes to this plugin are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-04
+
+### Fixed
+
+- **Two different commands could share one ledger row, and be replayed as advice
+  about a command nobody ran.** A signature longer than 200 characters was cut to
+  its first 200. That is a *prefix* match, so what collided was not random: it was
+  two commands sharing a long prefix and differing in the tail — a generated
+  invocation, a long flag list — which is the shape that reaches the cap in the
+  first place. Normalization sorts a trailing flag run, so the cut could land
+  partway through a sorted list of flags. Two unrelated single failures then met
+  the threshold of two between them and crossed into replay. A signature over the
+  cap now keeps a 171-character prefix and gains ` ... [truncated <12 hex>]`, a
+  digest of the **whole** normalized string, so the part that was cut still
+  separates them.
+- **`ledger list` clipped the digest marker off.** The listing shows at most 90
+  characters of a signature, which is inside the prefix, so two truncated entries
+  printed identical visible text with different ids — reading as a bug in the ids.
+  The marker is now kept and the width comes out of the prefix instead.
+  `renderContext` and `ledger forget` were unaffected; that asymmetry is pinned by
+  a test rather than assumed.
+
+### Notes
+
+- **No schema change, and no migration.** `schema` stays `2`. A signature at or
+  under the cap is byte-identical to what 0.4.0 wrote — pinned by a table of ten
+  signatures generated from the 0.4.0 code — so an existing ledger keeps matching
+  and keeps self-clearing. Entries recorded before this are *not* rewritten:
+  working out which command an ambiguous 200-character prefix came from would mean
+  guessing, which is the merge this change exists to prevent. They age out after 90
+  days or are evicted at the 200-entry cap.
+- **The marker is ASCII on purpose.** `…` mangles in a Windows console, and this
+  text reaches both a terminal and injected model context. `#` was rejected as a
+  digest sigil because it is a Bash comment character.
+- **The marker width and its detection regex are derived from the hex length**, not
+  written twice, so they cannot drift apart.
+- **The README's hard numbers are now pinned by the test suite.** Prose does not
+  fail a build when the code moves under it, which is how the behaviour at the cap
+  came to be undocumented. Two checks map every exported numeric constant to the
+  literal string the README uses for it; the load-bearing direction is that adding
+  a numeric export fails the suite until it is documented. Deliberately scoped to
+  exported numeric constants — not a prose linter.
+- No new dependencies. `node:crypto` was already imported.
+
 ## [0.4.0] - 2026-07-29
 
 ### Added
