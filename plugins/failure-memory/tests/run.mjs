@@ -1506,6 +1506,58 @@ check("a full ledger stays inside the output budget and says what it omitted", (
   assert(r.stdout.includes(ledgerPathFor(d, p.cwd)), "points at the file for the rest");
 });
 
+// The listing clips a signature to its own column, which is narrower than
+// MAX_SIGNATURE. A blind clip would cut the truncation marker off, and the two
+// rows below would then print identical visible text under different ids --
+// which reads as a bug in the ids rather than as two different commands. This is
+// the surface issue #20 asks about: the user's route to "did these merge?" is
+// this command, so the answer has to be legible here and not only in the file.
+check("two truncated signatures stay distinguishable in the listing", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = [
+    { tool: "Bash", signature: clampSignature(LONG_A), error_excerpt: "boom", count: 3, first_seen: iso(5), last_seen: iso(1) },
+    { tool: "Bash", signature: clampSignature(LONG_B), error_excerpt: "boom", count: 3, first_seen: iso(5), last_seen: iso(1) },
+  ];
+  assert(entries[0].signature !== entries[1].signature, "fixture signatures differ");
+  seedLedger(d, entries, p.cwd);
+
+  const r = ledgerCli(["list"], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+
+  const ids = rowIds(r.stdout, { starred: true });
+  assertEqual(ids.length, 2, `two rows, not one merged row: ${r.stdout}`);
+  assertEqual(new Set(ids).size, 2, "two distinct ids");
+
+  // The rows' visible text must differ too, not just their ids.
+  const rows = r.stdout.split("\n").filter((line) => ROW.test(line));
+  assertEqual(rows.length, 2, "two rows matched");
+  assert(rows[0] !== rows[1], `rows are identical text under different ids: ${rows[0]}`);
+  for (const row of rows) {
+    assert(/\[truncated [0-9a-f]{12}\]/.test(row), `marker survived the column clip: ${row}`);
+  }
+});
+
+check("forget prints the marker that tells two truncated entries apart", () => {
+  const d = freshDataDir();
+  const p = fixtureProject();
+  const entries = [
+    { tool: "Bash", signature: clampSignature(LONG_A), error_excerpt: "boom", count: 3, first_seen: iso(5), last_seen: iso(1) },
+    { tool: "Bash", signature: clampSignature(LONG_B), error_excerpt: "boom", count: 3, first_seen: iso(5), last_seen: iso(1) },
+  ];
+  const path = seedLedger(d, entries, p.cwd);
+
+  const r = ledgerCli(["forget", idFor(entries[0])], { dataDir: d, cwd: p.dir });
+  assertEqual(r.status, 0, "exit code");
+  assert(
+    r.stdout.includes(truncationMarkerOf(entries[0].signature)),
+    `names which one it forgot: ${r.stdout}`,
+  );
+
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  assertEqual(JSON.stringify(after.entries), JSON.stringify([entries[1]]), "only one removed");
+});
+
 check("forget removes only the named entry and leaves the others untouched", () => {
   const d = freshDataDir();
   const p = fixtureProject();
