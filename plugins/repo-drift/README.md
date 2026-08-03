@@ -142,17 +142,17 @@ same name, so check both.
 
 The filename is a truncated SHA-256 of the project path, so the path itself
 leaks nothing about your directory layout. Don't try to compute it — list the
-directory and open one, since every file records the project it belongs to as
-its first field:
+directory and open one, since every file records the project it belongs to in
+its `project` field:
 
 ```json
 {
-  "cwd": "/home/you/projects/thing",
   "schema": 1,
+  "project": "/home/you/projects/thing",
   "sessions": {
     "b3f1…": {
       "fingerprint": { "head": "9f8e…", "branch": "feat/auth", "ops": [] },
-      "updated": 1770000000000
+      "last_seen": "2026-08-03T21:28:28.973Z"
     }
   }
 }

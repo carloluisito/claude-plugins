@@ -224,6 +224,65 @@ check("the plugin declares no runtime dependencies", () => {
   );
 });
 
+// The README tells a reader to open one of these files and says what they will
+// find. A live install caught it naming two fields that do not exist (`cwd` and
+// `updated`, for what are really `project` and `last_seen`), which every test
+// here passed straight through: the code was right and the prose describing it
+// was wrong. Nothing but comparing the two catches that, so this compares them.
+check("the README documents the state file this plugin actually writes", () => {
+  const dir = initRepo();
+  const dataDir = freshDataDir();
+  run(dataDir, { cwd: dir, session_id: "s1" });
+
+  const written = JSON.parse(
+    readFileSync(statePathFor(resolveDataDir(dataDir), dir), "utf8"),
+  );
+  const readme = readFileSync(join(PLUGIN, "README.md"), "utf8");
+
+  const block = readme.match(/```json\n([\s\S]*?)```/)?.[1];
+  assert(block, "the README must show the state file's shape as a json block");
+  const documented = JSON.parse(block.replace(/…/g, ""));
+
+  const session = Object.values(written.sessions)[0];
+  const documentedSession = Object.values(documented.sessions)[0];
+
+  assertEqual(
+    Object.keys(documented).sort().join(","),
+    Object.keys(written).sort().join(","),
+    "documented top-level fields must be the ones actually written",
+  );
+  assertEqual(
+    Object.keys(documentedSession).sort().join(","),
+    Object.keys(session).sort().join(","),
+    "documented per-session fields must be the ones actually written",
+  );
+  assertEqual(
+    Object.keys(documentedSession.fingerprint).sort().join(","),
+    Object.keys(session.fingerprint).sort().join(","),
+    "documented fingerprint fields must be the ones actually written",
+  );
+
+  // Types matter as much as names: `last_seen` reads as a timestamp either way,
+  // and an epoch number in the docs would send a reader looking for the wrong
+  // thing. This is the half of the defect that a key comparison alone misses.
+  for (const key of Object.keys(session)) {
+    assertEqual(
+      typeof documentedSession[key],
+      typeof session[key],
+      `documented type of \`${key}\``,
+    );
+  }
+
+  // Every field name the prose mentions has to be a field that exists.
+  for (const named of readme.match(/`(project|cwd|last_seen|updated|schema)`/g) ?? []) {
+    const field = named.replaceAll("`", "");
+    assert(
+      field in written || field in session,
+      `README refers to a \`${field}\` field that is never written`,
+    );
+  }
+});
+
 // ============================================================ rendering
 
 const FP = (branch, head, ops = []) => ({ branch, head, ops });
