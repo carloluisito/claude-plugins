@@ -5,6 +5,23 @@ All notable changes to this plugin are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The test suite now pins the ledger skill's path to its script.** `skills/ledger/SKILL.md`
+  reaches its CLI by walking out of its own directory
+  (`node "${CLAUDE_SKILL_DIR}/../../scripts/ledger.mjs"`), and nothing checked that
+  string. Moving the skill a level, renaming `scripts/`, or splitting the CLI would
+  have broken the skill two ways at once — the `allowed-tools` rule would stop
+  matching, so every use prompts for permission, and the auto-run fence would call a
+  path that does not exist — while the suite stayed green, because it exercises
+  `scripts/ledger.mjs` directly and never reads `SKILL.md`. Four checks now resolve
+  every path `SKILL.md` names, assert the file exists, assert the `allowed-tools`
+  rule and the auto-run fence name the same file, and assert an exact count of
+  invocations so a dropped or renamed one cannot pass unnoticed. Tests and
+  `CHANGELOG.md` only; no shipped runtime code changed and no version bump.
+
 ## [0.4.1] - 2026-08-04
 
 ### Fixed
