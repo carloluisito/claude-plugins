@@ -1,4 +1,4 @@
-# carloluisito-plugins
+# claude-plugins
 
 Open-source plugins for [Claude Code](https://code.claude.com/docs).
 
